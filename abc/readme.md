@@ -1,295 +1,518 @@
-# Workflow Creation and Execution Mechanisms - Executive Summary
+# Autonomous Agentic Workflow Service Architecture
 
-## Overview
+## Executive Summary
 
-This document provides a comprehensive summary of the detailed workflow creation and execution mechanisms designed for the autonomous agentic workflow application. The system provides moderate autonomy with human oversight, supporting simple to medium complexity workflows through generic reusable templates.
+This document outlines the comprehensive architecture for an autonomous agentic workflow service that orchestrates multi-agent processes with human-in-the-loop capabilities, conditional branching, and robust execution management.
 
-## Architecture Summary
+## 1. Existing Services Analysis & Integration Points
 
-### Core Components Delivered
+### 1.1 Current Service Landscape
 
-1. **Workflow Creator** - Natural language to workflow translation system
-2. **Workflow Engine** - Execution orchestration with moderate autonomy
-3. **Template Manager** - Generic reusable workflow patterns
-4. **Validation Manager** - Comprehensive workflow validation
-5. **Error Manager** - Recovery mechanisms with human oversight
-6. **Monitoring Controller** - Real-time execution monitoring
-
-### Integration Strategy
-
-The system leverages existing services through lightweight integration patterns:
-
-- **LLM Service**: Natural language processing and content generation
-- **Agent Service**: Agent pool management and task assignment
-- **State Management Service**: Workspace/play patterns for coordination
-
-## Key Technical Specifications
-
-### 1. Natural Language Processing
-
-**Complexity Support**: Simple to Medium workflows (2-15 tasks)
-- **Simple**: Linear sequences, 2-5 tasks, minimal branching
-- **Medium**: Some conditional logic, 5-15 tasks, moderate complexity
-- **Complex**: Requires human approval before creation
-
-**Translation Pipeline**:
-```
-Natural Language → Intent Analysis → Task Extraction → 
-Dependency Mapping → Template Matching → Workflow Generation → 
-Human Validation → Executable Workflow
+```mermaid
+graph TB
+    subgraph "Existing Services"
+        LLM[LLM Service<br/>OpenAI-compatible API]
+        AGENT[Agent Service<br/>4 Tool Types + Execution]
+        STATE[State Management Service<br/>Workspace/Play/Block State]
+    end
+    
+    LLM --> AGENT
+    AGENT --> STATE
+    
+    subgraph "Tool Types"
+        API[API Tools]
+        SCRIPT[Script Tools]
+        UC[Use Case Tools]
+        MCP[MCP Tools]
+    end
+    
+    AGENT --> API
+    AGENT --> SCRIPT
+    AGENT --> UC
+    AGENT --> MCP
 ```
 
-**Key Features**:
-- Intent recognition with 85%+ accuracy for business processes
-- Automatic task type classification (6 core types)
-- Dependency analysis and optimization
-- Criticality assessment for human oversight points
+### 1.2 Integration Requirements
 
-### 2. Workflow Definition Schema
+**LLM Service Integration:**
+- Workflow template generation using LLM capabilities
+- Natural language workflow description parsing
+- Agent capability analysis for optimal workflow suggestions
 
-**Core Data Structure**:
-```typescript
-interface WorkflowDefinition {
-  id: string;
-  name: string;
-  description: string;
-  tasks: WorkflowTask[];           // Individual workflow steps
-  dependencies: TaskDependency[];  // Task execution order
-  executionMode: ExecutionMode;    // SUPERVISED | MONITORED | AUTONOMOUS
-  approvalPoints: ApprovalPoint[]; // Human oversight requirements
-  requiredAgentTypes: AgentTypeRequirement[];
-  stateSchema: WorkflowStateSchema; // State management integration
+**Agent Service Integration:**
+- Agent discovery and capability querying
+- Agent execution orchestration
+- Tool availability validation
+
+**State Management Service Integration:**
+- Workflow execution state persistence
+- Block execution tracking
+- Recovery state management
+- Workspace context sharing
+
+## 2. High-Level System Architecture
+
+```mermaid
+graph TB
+    subgraph "Workflow Service Core"
+        WTE[Workflow Template Engine]
+        WEE[Workflow Execution Engine]
+        DEP[Dependency Manager]
+        HIL[Human-in-Loop Manager]
+        REC[Recovery Manager]
+    end
+    
+    subgraph "Data Layer"
+        MONGO[MongoDB<br/>Workflow Templates]
+        STATE_SVC[State Management Service<br/>Execution Data]
+    end
+    
+    subgraph "External Services"
+        LLM_SVC[LLM Service]
+        AGENT_SVC[Agent Service]
+    end
+    
+    subgraph "Interfaces"
+        API[REST API]
+        WS[WebSocket API]
+        QUEUE[Message Queue]
+    end
+    
+    API --> WTE
+    API --> WEE
+    WS --> HIL
+    QUEUE --> HIL
+    
+    WTE --> MONGO
+    WTE --> LLM_SVC
+    WTE --> AGENT_SVC
+    
+    WEE --> DEP
+    WEE --> HIL
+    WEE --> REC
+    WEE --> STATE_SVC
+    WEE --> AGENT_SVC
+    
+    DEP --> STATE_SVC
+    REC --> STATE_SVC
+```
+
+## 3. Core Components
+
+### 3.1 Workflow Template Engine
+**Responsibilities:**
+- Autonomous workflow template generation
+- Template validation and optimization
+- Template versioning and storage
+- Agent capability analysis integration
+
+**Key Features:**
+- Natural language goal parsing
+- Agent-to-block mapping optimization
+- Dependency graph generation
+- Template reusability analysis
+
+### 3.2 Workflow Execution Engine
+**Responsibilities:**
+- Workflow instance management
+- Block execution orchestration
+- Parallel execution coordination
+- Conditional branching logic
+
+**Key Features:**
+- Dynamic execution planning
+- Resource allocation
+- Progress tracking
+- Error handling and propagation
+
+### 3.3 Dependency Manager
+**Responsibilities:**
+- Dependency graph resolution
+- Parallel execution opportunity identification
+- Blocking condition management
+- Circular dependency detection
+
+### 3.4 Human-in-Loop Manager
+**Responsibilities:**
+- Approval workflow management
+- Real-time notification handling
+- Asynchronous approval queuing
+- Input collection and validation
+
+### 3.5 Recovery Manager
+**Responsibilities:**
+- Failure detection and classification
+- Restart strategy determination
+- State recovery coordination
+- Partial execution preservation
+
+## 4. Data Models
+
+### 4.1 Workflow Template Schema (MongoDB)
+
+```json
+{
+  "_id": "ObjectId",
+  "templateId": "string",
+  "name": "string",
+  "description": "string",
+  "version": "string",
+  "createdAt": "Date",
+  "updatedAt": "Date",
+  "createdBy": "string",
+  "tags": ["string"],
+  "metadata": {
+    "estimatedDuration": "number",
+    "complexity": "string",
+    "category": "string"
+  },
+  "blocks": [
+    {
+      "blockId": "string",
+      "name": "string",
+      "description": "string",
+      "agentId": "string",
+      "agentType": "string",
+      "toolType": "string",
+      "configuration": "object",
+      "dependencies": ["string"],
+      "conditions": {
+        "type": "string",
+        "expression": "string",
+        "branches": [
+          {
+            "condition": "string",
+            "nextBlocks": ["string"]
+          }
+        ]
+      },
+      "humanInLoop": {
+        "required": "boolean",
+        "type": "string",
+        "approvalLevel": "string",
+        "inputSchema": "object"
+      },
+      "retryPolicy": {
+        "maxRetries": "number",
+        "backoffStrategy": "string",
+        "retryConditions": ["string"]
+      }
+    }
+  ],
+  "globalSettings": {
+    "timeout": "number",
+    "maxParallelBlocks": "number",
+    "defaultRetryPolicy": "object",
+    "humanInLoopDefaults": "object"
+  }
 }
 ```
 
-**Task Types Supported**:
-- `DATA_PROCESSING`: File processing, data transformation
-- `COMMUNICATION`: Email, notifications, messaging
-- `ANALYSIS`: Data analysis, report generation
-- `VALIDATION`: Quality checks, compliance verification
-- `DECISION`: Conditional logic, routing decisions
-- `INTEGRATION`: External system interactions
+### 4.2 Workflow Execution Model (State Management Service)
 
-### 3. Template System
-
-**Built-in Templates**:
-1. **Customer Onboarding** - Identity verification, account setup, welcome communications
-2. **Data Processing Pipeline** - ETL workflows with validation
-3. **Approval Workflow** - Multi-stage approval processes
-4. **Notification System** - Event-driven communication workflows
-
-**Template Features**:
-- Parameterized task definitions
-- Conditional task inclusion
-- Validation rules and constraints
-- Usage analytics and optimization
-
-### 4. Execution Engine
-
-**Execution Modes**:
-- **SUPERVISED**: Human approval required for critical decisions
-- **MONITORED**: Automated execution with human alerts
-- **AUTONOMOUS**: Fully automated within defined constraints
-
-**Key Capabilities**:
-- Agent pool management and selection
-- Task scheduling and coordination
-- Real-time progress monitoring
-- Error detection and recovery
-- State-based agent communication
-
-### 5. State Management Integration
-
-**Workspace Pattern Extension**:
-```typescript
-// Leverages existing State Management Service patterns
-Workspace → Play → Task States → Coordination Primitives
+```json
+{
+  "executionId": "string",
+  "templateId": "string",
+  "templateVersion": "string",
+  "workspaceId": "string",
+  "status": "string",
+  "startedAt": "Date",
+  "completedAt": "Date",
+  "createdBy": "string",
+  "currentBlocks": ["string"],
+  "completedBlocks": ["string"],
+  "failedBlocks": ["string"],
+  "blockedBlocks": ["string"],
+  "blockExecutions": [
+    {
+      "blockId": "string",
+      "executionId": "string",
+      "agentId": "string",
+      "status": "string",
+      "startedAt": "Date",
+      "completedAt": "Date",
+      "input": "object",
+      "output": "object",
+      "error": "object",
+      "retryCount": "number",
+      "humanInteractions": [
+        {
+          "type": "string",
+          "requestedAt": "Date",
+          "respondedAt": "Date",
+          "response": "object",
+          "approver": "string"
+        }
+      ]
+    }
+  ],
+  "globalContext": "object",
+  "recoveryPoints": [
+    {
+      "timestamp": "Date",
+      "state": "object",
+      "completedBlocks": ["string"]
+    }
+  ]
+}
 ```
 
-**State Operations**:
-- Task state tracking and updates
-- Shared data management
-- Communication channel coordination
-- Checkpoint and synchronization management
+## 5. API Design
 
-### 6. Agent Coordination
+### 5.1 Template Management APIs
 
-**Agent Pool Strategy**:
-- Work with pre-existing agent pools
-- Agent selection based on capabilities and performance
-- Load balancing and availability management
-- Performance tracking and optimization
+```
+POST /api/v1/templates/generate
+- Generate workflow template from natural language description
+- Body: { goal: string, constraints?: object, preferences?: object }
+- Response: { templateId: string, template: WorkflowTemplate }
 
-**Coordination Mechanisms**:
-- State-based communication (no direct agent-to-agent messaging)
-- Task dependency resolution
-- Parallel execution coordination
-- Error propagation and recovery
+GET /api/v1/templates
+- List workflow templates with filtering
+- Query: { category?, tags?, search?, limit?, offset? }
+- Response: { templates: WorkflowTemplate[], total: number }
 
-### 7. Error Handling and Recovery
+GET /api/v1/templates/{templateId}
+- Get specific template
+- Response: WorkflowTemplate
 
-**Error Classification**:
-- `TASK_FAILURE`: Individual task execution errors
-- `AGENT_UNAVAILABLE`: Agent pool exhaustion
-- `TIMEOUT`: Task or workflow timeouts
-- `VALIDATION_ERROR`: Data or process validation failures
-- `DEPENDENCY_FAILURE`: Upstream task failures
+PUT /api/v1/templates/{templateId}
+- Update template
+- Body: WorkflowTemplate
+- Response: WorkflowTemplate
 
-**Recovery Strategies**:
-- Automatic retry with exponential backoff
-- Agent replacement and task reassignment
-- Human escalation for critical failures
-- Workflow pause and manual intervention
-- Partial rollback and state recovery
+DELETE /api/v1/templates/{templateId}
+- Delete template
+- Response: { success: boolean }
 
-### 8. Human Oversight Integration
+POST /api/v1/templates/{templateId}/validate
+- Validate template against current agent capabilities
+- Response: { valid: boolean, issues: ValidationIssue[] }
+```
 
-**Approval Points**:
-- Critical task execution decisions
-- High-risk data operations
-- External system integrations
-- Workflow modifications during execution
+### 5.2 Execution Management APIs
 
-**Oversight Mechanisms**:
-- Real-time approval queues
-- Risk-based escalation rules
-- Performance monitoring dashboards
-- Audit trails and compliance reporting
+```
+POST /api/v1/executions
+- Start workflow execution
+- Body: { templateId: string, input?: object, workspaceId: string }
+- Response: { executionId: string, status: string }
 
-## API Specifications
+GET /api/v1/executions/{executionId}
+- Get execution status and details
+- Response: WorkflowExecution
 
-### Core Endpoints
+POST /api/v1/executions/{executionId}/pause
+- Pause execution
+- Response: { success: boolean }
 
-**Workflow Management**:
-- `POST /workflows` - Create from natural language
-- `POST /workflows/from-template` - Create from template
-- `GET /workflows` - List and filter workflows
-- `GET /workflows/{id}` - Get workflow details
+POST /api/v1/executions/{executionId}/resume
+- Resume paused execution
+- Response: { success: boolean }
 
-**Execution Control**:
-- `POST /workflows/{id}/execute` - Start execution
-- `GET /executions/{id}` - Get execution status
-- `POST /executions/{id}/control` - Pause/resume/cancel
-- `GET /executions/{id}/metrics` - Performance metrics
+POST /api/v1/executions/{executionId}/restart
+- Restart failed execution
+- Body: { fromBlock?: string, resetState?: boolean }
+- Response: { success: boolean }
 
-**Approval Management**:
-- `GET /approvals/pending` - Get pending approvals
-- `POST /approvals/{id}/decision` - Submit approval decision
+POST /api/v1/executions/{executionId}/cancel
+- Cancel execution
+- Response: { success: boolean }
 
-**Template Management**:
-- `GET /templates` - List available templates
-- `GET /templates/{id}` - Get template details
+GET /api/v1/executions/{executionId}/logs
+- Get execution logs
+- Query: { blockId?, level?, limit?, offset? }
+- Response: { logs: LogEntry[] }
+```
 
-## Performance Characteristics
+### 5.3 Human-in-Loop APIs
 
-### Expected Performance Metrics
+```
+GET /api/v1/approvals/pending
+- Get pending approvals for user
+- Query: { executionId?, blockId?, type? }
+- Response: { approvals: PendingApproval[] }
 
-**Workflow Creation**:
-- Natural language processing: < 30 seconds
-- Template instantiation: < 5 seconds
-- Validation and optimization: < 10 seconds
+POST /api/v1/approvals/{approvalId}/respond
+- Respond to approval request
+- Body: { approved: boolean, response?: object, comments?: string }
+- Response: { success: boolean }
 
-**Execution Performance**:
-- Task scheduling latency: < 2 seconds
-- Agent assignment time: < 5 seconds
-- State update propagation: < 1 second
-- Error detection and response: < 10 seconds
+WebSocket: /ws/approvals
+- Real-time approval notifications
+- Events: approval_requested, approval_responded, approval_timeout
+```
 
-**Scalability Targets**:
-- Concurrent workflows: 100+
-- Tasks per workflow: 50+
-- Agent pool size: 500+
-- Execution throughput: 1000+ tasks/hour
+## 6. Integration Patterns
 
-### Quality Metrics
+### 6.1 Agent Service Integration
 
-**Reliability**:
-- Workflow success rate: > 95%
-- Agent assignment success: > 98%
-- Error recovery rate: > 90%
-- Data consistency: 99.9%
+```mermaid
+sequenceDiagram
+    participant WS as Workflow Service
+    participant AS as Agent Service
+    participant SM as State Management
+    
+    WS->>AS: Query available agents
+    AS->>WS: Return agent capabilities
+    WS->>AS: Execute block with agent
+    AS->>WS: Execution started
+    AS->>SM: Update block state
+    AS->>WS: Execution completed
+    WS->>SM: Update workflow state
+```
 
-**User Experience**:
-- Natural language accuracy: > 85%
-- Template adoption rate: > 80%
-- Approval response time: < 2 hours
-- User satisfaction: > 4.0/5.0
+### 6.2 LLM Service Integration
 
-## Implementation Roadmap
+```mermaid
+sequenceDiagram
+    participant WS as Workflow Service
+    participant LLM as LLM Service
+    participant AS as Agent Service
+    
+    WS->>LLM: Generate workflow from goal
+    LLM->>WS: Return workflow structure
+    WS->>AS: Validate agent assignments
+    AS->>WS: Return validation results
+    WS->>LLM: Optimize workflow based on validation
+    LLM->>WS: Return optimized workflow
+```
 
-### Phase 1: Core Infrastructure (4 weeks)
-- Workflow Creator with basic NLP
-- Workflow Engine with state integration
-- Template Manager with 2 core templates
-- Basic validation and error handling
+### 6.3 State Management Integration
 
-### Phase 2: Agent Integration (3 weeks)
-- Agent Service integration
-- Task coordination mechanisms
-- Agent pool management
-- Performance monitoring
+```mermaid
+sequenceDiagram
+    participant WS as Workflow Service
+    participant SM as State Management
+    participant AS as Agent Service
+    
+    WS->>SM: Create execution state
+    SM->>WS: Return execution ID
+    WS->>AS: Execute block
+    AS->>SM: Update block state
+    SM->>WS: Notify state change
+    WS->>SM: Query execution state
+    SM->>WS: Return current state
+```
 
-### Phase 3: Advanced Features (3 weeks)
-- Advanced NLP capabilities
-- Additional workflow templates
-- Comprehensive error recovery
-- Human oversight integration
+## 7. Execution Flow Scenarios
 
-### Phase 4: Optimization (2 weeks)
-- Performance optimization
-- Advanced monitoring and analytics
-- Documentation and training
-- Production deployment
+### 7.1 Linear Workflow Execution
 
-## Success Criteria
+```mermaid
+flowchart TD
+    START([Start Execution]) --> LOAD[Load Template]
+    LOAD --> VALIDATE[Validate Dependencies]
+    VALIDATE --> EXEC1[Execute Block 1]
+    EXEC1 --> CHECK1{Success?}
+    CHECK1 -->|Yes| EXEC2[Execute Block 2]
+    CHECK1 -->|No| RETRY1[Retry Block 1]
+    RETRY1 --> CHECK1
+    EXEC2 --> CHECK2{Success?}
+    CHECK2 -->|Yes| EXEC3[Execute Block 3]
+    CHECK2 -->|No| RETRY2[Retry Block 2]
+    RETRY2 --> CHECK2
+    EXEC3 --> END([Complete])
+```
 
-### Technical Success Metrics
-1. **Workflow Creation Time**: < 5 minutes from description to execution
-2. **Execution Success Rate**: > 95% for template-based workflows
-3. **Agent Utilization**: > 80% efficient agent pool usage
-4. **Error Recovery**: > 90% automatic recovery for common failures
-5. **State Consistency**: 99.9% data integrity across executions
+### 7.2 Parallel Execution Flow
 
-### Business Success Metrics
-1. **User Adoption**: > 80% of workflows use templates
-2. **Time Savings**: 60%+ reduction in manual workflow setup
-3. **Process Reliability**: 50%+ reduction in workflow failures
-4. **Operational Efficiency**: 40%+ improvement in task completion time
-5. **User Satisfaction**: > 4.0/5.0 user experience rating
+```mermaid
+flowchart TD
+    START([Start Execution]) --> LOAD[Load Template]
+    LOAD --> ANALYZE[Analyze Dependencies]
+    ANALYZE --> EXEC1[Execute Block 1]
+    EXEC1 --> PARALLEL{Parallel Blocks Available?}
+    PARALLEL -->|Yes| EXEC2A[Execute Block 2A]
+    PARALLEL -->|Yes| EXEC2B[Execute Block 2B]
+    PARALLEL -->|Yes| EXEC2C[Execute Block 2C]
+    EXEC2A --> SYNC[Synchronization Point]
+    EXEC2B --> SYNC
+    EXEC2C --> SYNC
+    SYNC --> EXEC3[Execute Block 3]
+    EXEC3 --> END([Complete])
+```
 
-## Risk Mitigation
+### 7.3 Human-in-Loop Flow
 
-### Technical Risks
-- **Agent Availability**: Implement agent pool monitoring and auto-scaling
-- **State Consistency**: Use transactional state updates and conflict resolution
-- **Performance Degradation**: Implement circuit breakers and load balancing
-- **Integration Failures**: Design resilient integration patterns with fallbacks
+```mermaid
+flowchart TD
+    START([Block Execution]) --> CHECK{Human Approval Required?}
+    CHECK -->|No| EXECUTE[Execute Block]
+    CHECK -->|Yes| NOTIFY[Send Approval Request]
+    NOTIFY --> WAIT[Wait for Response]
+    WAIT --> TIMEOUT{Timeout?}
+    TIMEOUT -->|Yes| ESCALATE[Escalate Request]
+    TIMEOUT -->|No| RESPONSE{Approved?}
+    ESCALATE --> WAIT
+    RESPONSE -->|Yes| EXECUTE
+    RESPONSE -->|No| REJECT[Mark Block Rejected]
+    EXECUTE --> SUCCESS{Success?}
+    SUCCESS -->|Yes| COMPLETE[Mark Complete]
+    SUCCESS -->|No| FAIL[Mark Failed]
+    REJECT --> END([End])
+    COMPLETE --> END
+    FAIL --> END
+```
 
-### Operational Risks
-- **Human Oversight Bottlenecks**: Implement intelligent approval routing
-- **Workflow Complexity Creep**: Enforce complexity limits and validation
-- **Security Concerns**: Implement comprehensive audit trails and access controls
-- **Compliance Issues**: Build in compliance checking and reporting
+### 7.4 Conditional Branching Flow
 
-## Conclusion
+```mermaid
+flowchart TD
+    START([Execute Block]) --> COMPLETE[Block Completed]
+    COMPLETE --> EVAL[Evaluate Conditions]
+    EVAL --> COND1{Condition 1?}
+    COND1 -->|True| BRANCH1[Execute Branch 1 Blocks]
+    COND1 -->|False| COND2{Condition 2?}
+    COND2 -->|True| BRANCH2[Execute Branch 2 Blocks]
+    COND2 -->|False| DEFAULT[Execute Default Branch]
+    BRANCH1 --> MERGE[Merge Point]
+    BRANCH2 --> MERGE
+    DEFAULT --> MERGE
+    MERGE --> NEXT[Continue Workflow]
+    NEXT --> END([End])
+```
 
-The workflow creation and execution mechanisms provide a robust foundation for autonomous agentic workflows with the following key benefits:
+### 7.5 Recovery and Restart Flow
 
-1. **Moderate Autonomy**: Balanced automation with human oversight
-2. **Lightweight Integration**: Leverages existing service architecture
-3. **Generic Templates**: Reusable patterns for common business processes
-4. **Scalable Design**: Supports growth in complexity and volume
-5. **Reliable Operation**: Comprehensive error handling and recovery
+```mermaid
+flowchart TD
+    START([Failure Detected]) --> ANALYZE[Analyze Failure Type]
+    ANALYZE --> TYPE{Failure Type}
+    TYPE -->|Transient| RETRY[Retry Block]
+    TYPE -->|Agent Error| REASSIGN[Reassign to Different Agent]
+    TYPE -->|Configuration| HUMAN[Request Human Intervention]
+    TYPE -->|Critical| FAIL[Mark Workflow Failed]
+    
+    RETRY --> SUCCESS1{Success?}
+    SUCCESS1 -->|Yes| CONTINUE[Continue Execution]
+    SUCCESS1 -->|No| ESCALATE1[Escalate Failure]
+    
+    REASSIGN --> SUCCESS2{Success?}
+    SUCCESS2 -->|Yes| CONTINUE
+    SUCCESS2 -->|No| ESCALATE2[Escalate Failure]
+    
+    HUMAN --> RESOLVED{Resolved?}
+    RESOLVED -->|Yes| RESTART[Restart from Recovery Point]
+    RESOLVED -->|No| FAIL
+    
+    RESTART --> CONTINUE
+    ESCALATE1 --> HUMAN
+    ESCALATE2 --> HUMAN
+    CONTINUE --> END([Resume Normal Flow])
+    FAIL --> CLEANUP[Cleanup Resources]
+    CLEANUP --> NOTIFY[Notify Stakeholders]
+    NOTIFY --> FINAL([End])
+```
 
-The system is designed to evolve incrementally, starting with simple workflows and gradually supporting more complex scenarios while maintaining the core principles of moderate autonomy and human oversight.
+## 8. Database Schema Design
 
-## Documentation References
+### 8.1 MongoDB Collections
 
-- **[Workflow Creation and Execution Mechanisms](workflow-creation-execution-mechanisms.md)** - Core technical specifications
-- **[Workflow Execution Details](workflow-execution-details.md)** - Detailed execution engine implementation
-- **[Workflow Template System](workflow-template-system.md)** - Template architecture and built-in templates
-- **[Workflow API Specifications](workflow-api-specifications.md)** - Complete API documentation
-- **[Workflow Integration Patterns](workflow-integration-patterns.md)** - Service integration details
-- **[Autonomous Workflow Service Architecture](autonomous-workflow-service-architecture.md)** - Overall system architecture
-
-This comprehensive specification provides the foundation for implementing a production-ready workflow service that balances automation capabilities with human oversight requirements.
+**Templates Collection:**
+```javascript
+// Indexes
+db.templates.createIndex({ "templateId": 1 }, { unique: true })
+db.templates.createIndex({ "tags": 1 })
+db.templates.create
