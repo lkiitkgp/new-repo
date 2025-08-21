@@ -1,282 +1,316 @@
-# Simple AI Workflow POC Architecture
+# Minimal AI Workflow POC Architecture
 
 ## Overview
 
-This document outlines a simplified architecture for an AI-powered workflow generation POC. The focus is on core functionality: generating workflows with agentic blocks, executing them, monitoring completion, and handling errors.
-
-## Current System Analysis
-
-Based on the existing codebase analysis, the current system already has:
-
-- **Workflow Generation**: [`/generate`](apps/workflow/src/controllers/v1/workflow.controller.ts:85) endpoint using OpenAI GPT-4o
-- **Workflow Execution**: Complete DAG execution engine with topological sorting
-- **Agent Integration**: Support for agentic blocks via [`agentDetails`](apps/workflow/src/service/workflow.ts:45) fetching
-- **Error Handling**: HITL (Human-in-the-Loop) interruption support
-- **State Management**: Execution logging and resume capabilities
+Ultra-simple POC with just 2 endpoints:
+1. **Generate and Execute Workflow** - Creates agentic workflow and starts execution immediately
+2. **Check Status** - Returns current status, and on completion returns all execution details
 
 ## POC Architecture
 
 ```mermaid
-graph TB
-    subgraph "POC Components"
-        UI[User Interface]
-        API[Workflow API]
-        GEN[AI Generator]
-        EXE[Execution Engine]
-        MON[Monitor]
-    end
-    
-    subgraph "Data Layer"
-        DB[(MongoDB)]
-        AGENTS[(Agent Store)]
-    end
-    
-    UI --> API
-    API --> GEN
-    GEN --> EXE
-    EXE --> MON
-    MON --> API
-    
-    GEN --> AGENTS
-    EXE --> DB
-    MON --> DB
+graph LR
+    CLIENT[Client] --> API[POC API]
+    API --> GEN[Generate Workflow]
+    GEN --> EXE[Execute Immediately]
+    EXE --> MON[Monitor Status]
+    MON --> DB[(MongoDB)]
+    API --> STATUS[Status Check]
+    STATUS --> DB
 ```
 
-## Core POC Features
+## API Design
 
-### 1. Simple Workflow Generation
-
-**Enhancement to existing [`generateWorkflowFromLLM`](apps/workflow/src/service/workflow.ts:45) method:**
+### Endpoint 1: Generate and Execute Workflow
 
 ```typescript
-interface SimplePOCRequest {
+// POST /api/poc/workflow/generate-and-execute
+interface GenerateAndExecuteRequest {
   problemStatement: string;
-  // Only agentic blocks for POC
   agentIds: string[];
 }
 
-interface SimplePOCResponse {
+interface GenerateAndExecuteResponse {
   workflowId: string;
-  graph: Graph;
-  estimatedDuration: number;
-  agentCount: number;
+  runId: string;
+  status: 'started';
+  message: string;
 }
 
-class SimplePOCGenerator {
-  async generateAgenticWorkflow(request: SimplePOCRequest): Promise<SimplePOCResponse> {
-    // 1. Fetch available agents (existing functionality)
-    const agents = await this.getAgentDetails(request.agentIds);
-    
-    // 2. Generate workflow using existing LLM integration
-    const prompt = this.buildAgenticPrompt(request.problemStatement, agents);
-    const workflow = await this.callLLM(prompt);
-    
-    // 3. Validate only agentic blocks
-    const validated = await this.validateAgenticWorkflow(workflow);
-    
-    // 4. Store and return
-    const saved = await this.workflowService.createWorkflow(validated);
-    
+// Example Request:
+{
+  "problemStatement": "Analyze customer feedback and generate a summary report",
+  "agentIds": ["text-analyzer-agent", "report-generator-agent"]
+}
+
+// Example Response:
+{
+  "workflowId": "wf_12345",
+  "runId": "run_67890",
+  "status": "started",
+  "message": "Workflow generated and execution started"
+}
+```
+
+### Endpoint 2: Check Status
+
+```typescript
+// GET /api/poc/workflow/{workflowId}/runs/{runId}/status
+interface StatusResponse {
+  workflowId: string;
+  runId: string;
+  status: 'running' | 'completed' | 'failed';
+  progress: number; // 0-100
+  currentStep?: string;
+  
+  // Only populated when status is 'completed' or 'failed'
+  executionDetails?: {
+    startTime: string;
+    endTime: string;
+    totalDuration: number; // seconds
+    steps: StepDetail[];
+    finalOutput?: any;
+    errors?: ExecutionError[];
+  };
+}
+
+interface StepDetail {
+  blockId: string;
+  agentName: string;
+  status: 'completed' | 'failed' | 'skipped';
+  startTime: string;
+  endTime?: string;
+  duration?: number; // seconds
+  input: any;
+  output?: any;
+  error?: string;
+}
+
+// Example Response (Running):
+{
+  "workflowId": "wf_12345",
+  "runId": "run_67890",
+  "status": "running",
+  "progress": 60,
+  "currentStep": "report-generator-agent"
+}
+
+// Example Response (Completed):
+{
+  "workflowId": "wf_12345",
+  "runId": "run_67890",
+  "status": "completed",
+  "progress": 100,
+  "executionDetails": {
+    "startTime": "2024-01-15T10:00:00Z",
+    "endTime": "2024-01-15T10:05:30Z",
+    "totalDuration": 330,
+    "steps": [
+      {
+        "blockId": "block_1",
+        "agentName": "text-analyzer-agent",
+        "status": "completed",
+        "startTime": "2024-01-15T10:00:00Z",
+        "endTime": "2024-01-15T10:03:00Z",
+        "duration": 180,
+        "input": "Customer feedback data...",
+        "output": "Analysis results..."
+      },
+      {
+        "blockId": "block_2",
+        "agentName": "report-generator-agent",
+        "status": "completed",
+        "startTime": "2024-01-15T10:03:00Z",
+        "endTime": "2024-01-15T10:05:30Z",
+        "duration": 150,
+        "input": "Analysis results...",
+        "output": "Final report..."
+      }
+    ],
+    "finalOutput": "Generated summary report with insights..."
+  }
+}
+```
+
+## Implementation Plan
+
+### Phase 1: Enhance Existing Controller
+
+Modify [`workflow.controller.ts`](apps/workflow/src/controllers/v1/workflow.controller.ts) to add POC endpoints:
+
+```typescript
+class WorkflowController {
+  // Existing methods...
+
+  @Post('/poc/generate-and-execute')
+  async generateAndExecutePOC(
+    @Body() request: GenerateAndExecuteRequest,
+    @Header('x-client-id') clientId: string,
+    @Header('x-project-id') projectId: string,
+    @Header('x-workspace-id') workspaceId: string
+  ): Promise<GenerateAndExecuteResponse> {
+    // 1. Generate workflow using existing generateWorkflowFromLLM
+    const workflow = await this.workflowService.generateWorkflowFromLLM(
+      request.problemStatement,
+      request.agentIds,
+      { clientId, projectId, workspaceId }
+    );
+
+    // 2. Immediately execute the workflow
+    const runId = await this.workflowService.executeWorkflow(
+      workflow.id,
+      { clientId, projectId, workspaceId }
+    );
+
     return {
-      workflowId: saved.id,
-      graph: validated,
-      estimatedDuration: this.estimateDuration(validated),
-      agentCount: this.countAgents(validated)
+      workflowId: workflow.id,
+      runId: runId,
+      status: 'started',
+      message: 'Workflow generated and execution started'
     };
   }
 
-  private buildAgenticPrompt(problem: string, agents: any[]): string {
-    return `
-Create a workflow to solve: ${problem}
+  @Get('/poc/{workflowId}/runs/{runId}/status')
+  async getPOCStatus(
+    @Path() workflowId: string,
+    @Path() runId: string,
+    @Header('x-client-id') clientId: string
+  ): Promise<StatusResponse> {
+    // Get execution status using existing methods
+    const status = await this.workflowService.getExecutionStatus(workflowId, runId);
+    
+    const response: StatusResponse = {
+      workflowId,
+      runId,
+      status: this.mapExecutionStatus(status.state),
+      progress: this.calculateProgress(status)
+    };
 
-Available AI Agents:
-${agents.map(a => `- ${a.name}: ${a.description}`).join('\n')}
+    // Add current step if running
+    if (status.state === 'running') {
+      response.currentStep = status.currentBlockId;
+    }
+
+    // Add full details if completed or failed
+    if (status.state === 'completed' || status.state === 'failed') {
+      response.executionDetails = await this.buildExecutionDetails(workflowId, runId);
+    }
+
+    return response;
+  }
+
+  private async buildExecutionDetails(workflowId: string, runId: string): Promise<any> {
+    // Use existing execution logs to build detailed response
+    const logs = await this.workflowService.getExecutionLogs(workflowId, runId);
+    const workflow = await this.workflowService.getWorkflow(workflowId);
+    
+    return {
+      startTime: logs.startTime,
+      endTime: logs.endTime,
+      totalDuration: logs.totalDuration,
+      steps: this.buildStepDetails(logs, workflow),
+      finalOutput: logs.finalOutput,
+      errors: logs.errors
+    };
+  }
+}
+```
+
+### Phase 2: Enhance Workflow Service
+
+Modify [`workflow.service.ts`](apps/workflow/src/service/workflow.ts) to support POC requirements:
+
+```typescript
+class WorkflowService {
+  // Existing methods...
+
+  async generateWorkflowFromLLM(
+    problemStatement: string,
+    agentIds: string[],
+    context: any
+  ): Promise<any> {
+    // Enhance existing method to focus on agentic blocks only
+    const agentDetails = await this.getAgentDetails(agentIds);
+    
+    const prompt = `
+Create a workflow to solve: ${problemStatement}
+
+Available AI Agents (use ONLY these):
+${agentDetails.map(a => `- ${a.name}: ${a.description}`).join('\n')}
 
 Requirements:
 - Use ONLY agentic blocks (AI agents)
-- Create a logical sequence of agent interactions
-- Each block should have clear inputs/outputs
+- Create a logical sequence
 - Ensure proper data flow between agents
+- Return valid workflow graph
 
-Return a valid workflow graph with only agentic blocks.
+Generate workflow with agentic blocks only.
     `;
+
+    const llmResponse = await this.callLLM(prompt);
+    const workflow = this.parseAndValidateWorkflow(llmResponse);
+    
+    // Store workflow
+    return await this.createWorkflow(workflow, context);
+  }
+
+  async executeWorkflow(workflowId: string, context: any): Promise<string> {
+    // Use existing execution logic
+    return await this.startExecution(workflowId, context);
+  }
+
+  async getExecutionStatus(workflowId: string, runId: string): Promise<any> {
+    // Use existing status tracking
+    return await this.getRunStatus(workflowId, runId);
   }
 }
 ```
-
-### 2. Simple Execution with Monitoring
-
-**Enhancement to existing execution engine:**
-
-```typescript
-interface ExecutionStatus {
-  workflowId: string;
-  runId: string;
-  status: 'running' | 'completed' | 'failed' | 'paused';
-  currentBlock?: string;
-  progress: number; // 0-100
-  errors?: ExecutionError[];
-  startTime: Date;
-  endTime?: Date;
-}
-
-class SimplePOCExecutor {
-  async executeAndMonitor(workflowId: string): Promise<ExecutionStatus> {
-    // 1. Start execution using existing engine
-    const runId = await this.workflowService.executeWorkflow(workflowId);
-    
-    // 2. Monitor execution
-    return await this.monitorExecution(workflowId, runId);
-  }
-
-  async monitorExecution(workflowId: string, runId: string): Promise<ExecutionStatus> {
-    const status = await this.workflowService.getExecutionStatus(workflowId, runId);
-    
-    return {
-      workflowId,
-      runId,
-      status: this.mapStatus(status.state),
-      currentBlock: status.currentBlockId,
-      progress: this.calculateProgress(status),
-      errors: status.errors,
-      startTime: status.startTime,
-      endTime: status.endTime
-    };
-  }
-
-  private calculateProgress(status: any): number {
-    const totalBlocks = status.totalBlocks || 1;
-    const completedBlocks = status.completedBlocks || 0;
-    return Math.round((completedBlocks / totalBlocks) * 100);
-  }
-}
-```
-
-### 3. Error Handling and Updates
-
-**Simple error handling for POC:**
-
-```typescript
-interface ErrorUpdate {
-  workflowId: string;
-  runId: string;
-  blockId: string;
-  errorType: 'agent_failure' | 'timeout' | 'invalid_output' | 'connection_error';
-  errorMessage: string;
-  suggestedFix?: string;
-  canRetry: boolean;
-}
-
-class SimplePOCErrorHandler {
-  async handleExecutionError(error: ErrorUpdate): Promise<void> {
-    // 1. Log error
-    await this.logError(error);
-    
-    // 2. Determine if auto-retry is possible
-    if (error.canRetry && this.shouldAutoRetry(error)) {
-      await this.retryBlock(error.workflowId, error.runId, error.blockId);
-      return;
-    }
-    
-    // 3. Pause execution for manual intervention
-    await this.pauseExecution(error.workflowId, error.runId);
-    
-    // 4. Notify user
-    await this.notifyUser(error);
-  }
-
-  async updateAndResume(workflowId: string, runId: string, fixes: any[]): Promise<void> {
-    // 1. Apply fixes
-    for (const fix of fixes) {
-      await this.applyFix(workflowId, runId, fix);
-    }
-    
-    // 2. Resume execution
-    await this.workflowService.resumeWorkflow(workflowId, runId);
-  }
-}
-```
-
-## POC API Endpoints
-
-### Core Endpoints for POC
-
-```typescript
-// POST /api/v1/workflows/generate/poc
-interface POCGenerateAPI {
-  request: SimplePOCRequest;
-  response: SimplePOCResponse;
-}
-
-// POST /api/v1/workflows/{workflowId}/execute
-interface POCExecuteAPI {
-  response: {
-    runId: string;
-    status: ExecutionStatus;
-  };
-}
-
-// GET /api/v1/workflows/{workflowId}/runs/{runId}/status
-interface POCStatusAPI {
-  response: ExecutionStatus;
-}
-
-// POST /api/v1/workflows/{workflowId}/runs/{runId}/fix
-interface POCFixAPI {
-  request: {
-    fixes: ErrorFix[];
-  };
-  response: {
-    applied: boolean;
-    resuming: boolean;
-  };
-}
-```
-
-## POC Implementation Plan
-
-### Phase 1: Core Generation (Week 1)
-- [ ] Enhance existing [`generateWorkflowFromLLM`](apps/workflow/src/service/workflow.ts:45) for agentic-only workflows
-- [ ] Add validation to ensure only agentic blocks
-- [ ] Test with simple agent combinations
-
-### Phase 2: Execution Monitoring (Week 2)
-- [ ] Enhance existing execution engine with real-time status
-- [ ] Add progress calculation for agentic workflows
-- [ ] Implement simple error detection
-
-### Phase 3: Error Handling (Week 3)
-- [ ] Add error classification for agentic blocks
-- [ ] Implement retry logic for common failures
-- [ ] Add manual intervention capabilities
-
-### Phase 4: POC Integration (Week 4)
-- [ ] Create simple UI for POC demonstration
-- [ ] Add end-to-end testing
-- [ ] Performance optimization for POC scenarios
 
 ## POC Success Criteria
 
-1. **Generation**: Create workflows with 3-5 agentic blocks in < 30 seconds
-2. **Execution**: Successfully execute agentic workflows with real-time monitoring
-3. **Completion**: Detect workflow completion and provide final status
-4. **Error Handling**: Handle agent failures and allow manual fixes
-5. **Simplicity**: Demonstrate core functionality without complex features
+1. **Single Request**: Generate and execute agentic workflow in one API call
+2. **Status Monitoring**: Check execution progress with simple status endpoint
+3. **Complete Details**: Get full execution details when workflow completes
+4. **Error Handling**: Handle failures gracefully with error details in status
+5. **Simplicity**: Only 2 endpoints needed for complete POC demonstration
 
-## Technology Stack (Minimal)
+## Testing Scenarios
 
-- **Backend**: Existing Node.js/TypeScript with Express
-- **Database**: Existing MongoDB setup
-- **AI**: Existing OpenAI GPT-4o integration
-- **Frontend**: Simple React/HTML interface for demonstration
-- **Monitoring**: Basic logging and status tracking
+### Test Case 1: Simple 2-Agent Workflow
+```bash
+# 1. Generate and execute
+curl -X POST /api/poc/workflow/generate-and-execute \
+  -H "x-client-id: test-client" \
+  -H "x-project-id: test-project" \
+  -H "x-workspace-id: test-workspace" \
+  -d '{
+    "problemStatement": "Analyze text and generate summary",
+    "agentIds": ["text-analyzer", "summarizer"]
+  }'
 
-## Next Steps
+# 2. Check status (repeat until completed)
+curl -X GET /api/poc/workflow/wf_12345/runs/run_67890/status \
+  -H "x-client-id: test-client"
+```
 
-1. **Review POC Requirements**: Confirm this simplified approach meets POC goals
-2. **Prioritize Features**: Focus on core workflow generation and execution
-3. **Implementation**: Start with Phase 1 enhancements to existing system
-4. **Testing**: Create test scenarios with real agentic workflows
-5. **Demo Preparation**: Build simple interface for POC demonstration
+### Test Case 2: Complex Multi-Agent Workflow
+```bash
+# 1. Generate and execute
+curl -X POST /api/poc/workflow/generate-and-execute \
+  -d '{
+    "problemStatement": "Process customer data, analyze sentiment, generate insights, and create report",
+    "agentIds": ["data-processor", "sentiment-analyzer", "insight-generator", "report-creator"]
+  }'
 
-This simplified architecture leverages the existing robust foundation while focusing specifically on the POC requirements for agentic workflow generation, execution, and monitoring.
+# 2. Monitor until completion
+curl -X GET /api/poc/workflow/{workflowId}/runs/{runId}/status
+```
+
+## Implementation Timeline
+
+- **Day 1-2**: Enhance existing controller with POC endpoints
+- **Day 3-4**: Modify workflow service for agentic-only generation
+- **Day 5**: Add comprehensive status response with execution details
+- **Day 6-7**: Testing and refinement
+
+This minimal POC architecture leverages your existing robust system while providing exactly the 2 endpoints you need for demonstration.
