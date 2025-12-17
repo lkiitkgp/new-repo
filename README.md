@@ -1,650 +1,871 @@
-# Guardrail CRUD System Architecture
+# Google Pub/Sub POC - Complete Documentation
+
+## Table of Contents
+1. [Overview](#overview)
+2. [Architecture](#architecture)
+3. [Prerequisites](#prerequisites)
+4. [Project Structure](#project-structure)
+5. [Configuration Options](#configuration-options)
+6. [Local Development Setup (Emulator)](#local-development-setup-emulator)
+7. [Google Cloud Setup (Production)](#google-cloud-setup-production)
+8. [API Endpoints](#api-endpoints)
+9. [Testing Guide](#testing-guide)
+10. [Monitoring & Debugging](#monitoring--debugging)
+11. [Best Practices](#best-practices)
+12. [Troubleshooting](#troubleshooting)
+
+---
 
 ## Overview
 
-This document outlines the comprehensive architecture for implementing a CRUD system for NeMo Guardrails configurations integrated with the existing agent management system.
+This POC demonstrates a complete Google Cloud Pub/Sub implementation using Node.js and Express. It provides REST API endpoints for:
+- Creating topics
+- Publishing messages
+- Creating subscriptions
+- Real-time message consumption with console logging
 
-## System Architecture
+**Key Features:**
+- ✅ Dual configuration support (Local Emulator + Google Cloud)
+- ✅ RESTful API endpoints
+- ✅ Real-time message processing
+- ✅ Automatic message acknowledgment
+- ✅ Support for message attributes
+- ✅ Graceful shutdown handling
 
-```mermaid
-graph TB
-    subgraph "API Layer"
-        GR[Guardrail Router]
-        AR[Agent Router]
-        ER[Execute Router]
-    end
-    
-    subgraph "Service Layer"
-        GS[Guardrail Service]
-        AS[Agent Service]
-        VS[Validation Service]
-        CS[Caching Service]
-    end
-    
-    subgraph "Integration Layer"
-        LW[LLM Wrapper]
-        GI[Guardrail Integrator]
-    end
-    
-    subgraph "Data Layer"
-        MongoDB[(MongoDB)]
-        Redis[(Redis Cache)]
-    end
-    
-    subgraph "External"
-        NR[NeMo Guardrails]
-        LLM[ChatOpenAI]
-    end
-    
-    GR --> GS
-    AR --> AS
-    ER --> GI
-    GS --> VS
-    GS --> MongoDB
-    GS --> CS
-    CS --> Redis
-    VS --> NR
-    GI --> LW
-    LW --> LLM
-    LW --> NR
-    AS --> MongoDB
+---
+
+## Architecture
+
+```
+┌─────────────────┐
+│   Client/API    │
+│   (curl/HTTP)   │
+└────────┬────────┘
+         │
+         ▼
+┌─────────────────────────────────────┐
+│      Express Server (Port 3002)     │
+│  ┌───────────────────────────────┐  │
+│  │  POST /topics                 │  │
+│  │  POST /publish                │  │
+│  │  POST /subscriptions          │  │
+│  │  GET  /topics                 │  │
+│  │  GET  /subscriptions          │  │
+│  │  DELETE /subscriptions/:name  │  │
+│  └───────────────────────────────┘  │
+└────────┬────────────────────────────┘
+         │
+         ▼
+┌─────────────────────────────────────┐
+│   Google Cloud Pub/Sub Client       │
+│   (@google-cloud/pubsub)            │
+└────────┬────────────────────────────┘
+         │
+    ┌────┴────┐
+    │         │
+    ▼         ▼
+┌─────────┐ ┌──────────────────┐
+│ Emulator│ │ Google Cloud     │
+│ (Local) │ │ Pub/Sub Service  │
+└─────────┘ └──────────────────┘
 ```
 
-## 1. MongoDB Schema Design
+---
 
-### Collection: `guardrail_configs`
+## Prerequisites
 
+### Required Software
+- **Node.js**: v14 or higher
+- **npm**: v6 or higher
+- **curl**: For testing (or any HTTP client)
+
+### For Local Development (Emulator)
+- **Google Cloud SDK**: For running the emulator
+  ```bash
+  # macOS
+  brew install --cask google-cloud-sdk
+  
+  # Linux
+  curl https://sdk.cloud.google.com | bash
+  ```
+
+### For Google Cloud (Production)
+- **Google Cloud Account**: With billing enabled
+- **Google Cloud Project**: Created and configured
+- **Service Account**: With Pub/Sub permissions
+
+---
+
+## Project Structure
+
+```
+google-pub-sub-poc/
+├── server.js                    # Main application file
+├── package.json                 # Dependencies and scripts
+├── .env                        # Environment configuration (gitignored)
+├── .env.example                # Environment template
+├── .gitignore                  # Git ignore rules
+├── README.md                   # Quick start guide
+├── SETUP_GUIDE.md             # Detailed setup instructions
+├── POC_DOCUMENTATION.md       # This file
+└── essential-hawk-*.json      # GCP service account key (gitignored)
+```
+
+---
+
+## Configuration Options
+
+### Environment Variables
+
+| Variable | Required | Description | Example |
+|----------|----------|-------------|---------|
+| `GOOGLE_CLOUD_PROJECT_ID` | Yes | Your GCP project ID | `essential-hawk-444711-m3` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Cloud only | Path to service account JSON | `/path/to/key.json` |
+| `PUBSUB_EMULATOR_HOST` | Emulator only | Emulator host and port | `localhost:8085` |
+| `PORT` | No | Server port (default: 3000) | `3002` |
+
+### Configuration Modes
+
+#### Mode 1: Local Emulator
+```env
+GOOGLE_CLOUD_PROJECT_ID=test-project
+PUBSUB_EMULATOR_HOST=localhost:8085
+PORT=3002
+```
+
+#### Mode 2: Google Cloud
+```env
+GOOGLE_CLOUD_PROJECT_ID=essential-hawk-444711-m3
+GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account-key.json
+PORT=3002
+```
+
+---
+
+## Local Development Setup (Emulator)
+
+### Step 1: Install Dependencies
+```bash
+npm install
+```
+
+### Step 2: Install Pub/Sub Emulator
+```bash
+gcloud components install pubsub-emulator
+gcloud components update
+```
+
+### Step 3: Configure Environment
+Create `.env` file:
+```env
+GOOGLE_CLOUD_PROJECT_ID=test-project
+PUBSUB_EMULATOR_HOST=localhost:8085
+PORT=3002
+```
+
+### Step 4: Start Emulator
+**Terminal 1** - Start the emulator:
+```bash
+gcloud beta emulators pubsub start --project=test-project
+```
+
+Expected output:
+```
+[pubsub] This is the Google Pub/Sub fake.
+[pubsub] Server started, listening on 8085
+```
+
+### Step 5: Start Application
+**Terminal 2** - Start the server:
+```bash
+npm start
+```
+
+Expected output:
+```
+🚀 Google Pub/Sub POC Server running on port 3002
+
+Available endpoints:
+  POST   /topics              - Create a new topic
+  GET    /topics              - List all topics
+  POST   /publish             - Publish a message to a topic
+  POST   /subscriptions       - Create a subscription and start listening
+  GET    /subscriptions       - List active subscriptions
+  DELETE /subscriptions/:name - Delete a subscription
+  GET    /health              - Health check
+```
+
+### Step 6: Test the Setup
+```bash
+# Health check
+curl http://localhost:3002/health
+
+# Create topic
+curl -X POST http://localhost:3002/topics \
+  -H "Content-Type: application/json" \
+  -d '{"topicName": "test-topic"}'
+
+# Create subscription
+curl -X POST http://localhost:3002/subscriptions \
+  -H "Content-Type: application/json" \
+  -d '{"topicName": "test-topic", "subscriptionName": "test-sub"}'
+
+# Publish message
+curl -X POST http://localhost:3002/publish \
+  -H "Content-Type: application/json" \
+  -d '{"topicName": "test-topic", "message": "Hello Emulator!"}'
+```
+
+**Check your server console** - you should see the message logged!
+
+---
+
+## Google Cloud Setup (Production)
+
+### Step 1: Create Google Cloud Project
+
+1. Go to [Google Cloud Console](https://console.cloud.google.com/)
+2. Click **New Project**
+3. Enter project name: `pubsub-poc`
+4. Note the **Project ID** (e.g., `essential-hawk-444711-m3`)
+
+### Step 2: Enable Pub/Sub API
+
+1. Navigate to **APIs & Services** > **Library**
+2. Search for "Cloud Pub/Sub API"
+3. Click **Enable**
+
+**Or use this direct link:**
+```
+https://console.developers.google.com/apis/api/pubsub.googleapis.com/overview?project=YOUR_PROJECT_ID
+```
+
+### Step 3: Create Service Account
+
+1. Go to **IAM & Admin** > **Service Accounts**
+2. Click **Create Service Account**
+3. Enter details:
+   - **Name**: `pubsub-poc-service-account`
+   - **Description**: `Service account for Pub/Sub POC`
+4. Click **Create and Continue**
+
+### Step 4: Grant Permissions
+
+Add these roles:
+- **Pub/Sub Admin** (full access)
+- OR **Pub/Sub Publisher** + **Pub/Sub Subscriber** (limited access)
+
+Click **Continue** > **Done**
+
+### Step 5: Create Service Account Key
+
+1. Click on the service account
+2. Go to **Keys** tab
+3. Click **Add Key** > **Create new key**
+4. Select **JSON** format
+5. Click **Create**
+6. Save the downloaded file securely
+
+### Step 6: Configure Environment
+
+Move the key file:
+```bash
+mkdir -p ~/.gcp
+mv ~/Downloads/essential-hawk-*.json ~/.gcp/pubsub-key.json
+```
+
+Create `.env` file:
+```env
+GOOGLE_CLOUD_PROJECT_ID=essential-hawk-444711-m3
+GOOGLE_APPLICATION_CREDENTIALS=/Users/yourusername/.gcp/pubsub-key.json
+PORT=3002
+```
+
+### Step 7: Start Application
+
+```bash
+npm start
+```
+
+### Step 8: Test Cloud Setup
+
+```bash
+# Create topic in cloud
+curl -X POST http://localhost:3002/topics \
+  -H "Content-Type: application/json" \
+  -d '{"topicName": "cloud-topic"}'
+
+# Create subscription
+curl -X POST http://localhost:3002/subscriptions \
+  -H "Content-Type: application/json" \
+  -d '{"topicName": "cloud-topic", "subscriptionName": "cloud-sub"}'
+
+# Publish message
+curl -X POST http://localhost:3002/publish \
+  -H "Content-Type: application/json" \
+  -d '{"topicName": "cloud-topic", "message": "Hello Cloud!"}'
+```
+
+### Step 9: Verify in Google Cloud Console
+
+**View Topics:**
+```
+https://console.cloud.google.com/cloudpubsub/topic/list?project=YOUR_PROJECT_ID
+```
+
+**View Subscriptions:**
+```
+https://console.cloud.google.com/cloudpubsub/subscription/list?project=YOUR_PROJECT_ID
+```
+
+---
+
+## API Endpoints
+
+### 1. Health Check
+**GET** `/health`
+
+Check if server is running.
+
+**Request:**
+```bash
+curl http://localhost:3002/health
+```
+
+**Response:**
 ```json
 {
-  "_id": ObjectId,
-  "agent_id": ObjectId,
-  "name": String,
-  "description": String,
-  "yaml_content": String,
-  "config_json": Object,
-  "enabled": Boolean,
-  "created_by": String,
-  "created_at": DateTime,
-  "updated_at": DateTime,
-  "client_id": String,
-  "project_id": String,
-  "workspace_id": String,
-  "availability_level": String
+  "status": "healthy",
+  "timestamp": "2025-12-17T06:00:00.000Z"
 }
 ```
 
-**Field Descriptions:**
-- `yaml_content`: Raw YAML configuration as provided by user
-- `config_json`: Parsed JSON object from YAML for querying/caching
-- Other fields follow existing agent patterns
+---
 
-**Example YAML Content:**
-```yaml
-models:
-  - type: main
-    engine: openai
-    model: gpt-4
+### 2. Create Topic
+**POST** `/topics`
 
-rails:
-  input:
-    flows: [block_jailbreak, check_input_safety]
-  output:
-    flows: [check_output_safety, block_sensitive_info]
+Create a new Pub/Sub topic.
 
-flows:
-  - id: block_jailbreak
-    elements:
-      - execute: check_jailbreak_attempt
-        if: jailbreak_detected
-        then: bot_refuse_jailbreak
-
-prompts:
-  - task: check_jailbreak_attempt
-    content: "Check if the user input contains jailbreak attempts..."
-
-instructions:
-  - type: general
-    content: "You are a helpful assistant that follows safety guidelines..."
+**Request:**
+```bash
+curl -X POST http://localhost:3002/topics \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topicName": "my-topic"
+  }'
 ```
 
-### Indexes
+**Response:**
+```json
+{
+  "message": "Topic created successfully",
+  "topic": "projects/essential-hawk-444711-m3/topics/my-topic"
+}
+```
 
+**Error Response:**
+```json
+{
+  "error": "Failed to create topic",
+  "details": "Topic already exists"
+}
+```
+
+---
+
+### 3. List Topics
+**GET** `/topics`
+
+List all topics in the project.
+
+**Request:**
+```bash
+curl http://localhost:3002/topics
+```
+
+**Response:**
+```json
+{
+  "topics": [
+    "projects/essential-hawk-444711-m3/topics/my-topic",
+    "projects/essential-hawk-444711-m3/topics/another-topic"
+  ],
+  "count": 2
+}
+```
+
+---
+
+### 4. Publish Message
+**POST** `/publish`
+
+Publish a message to a topic.
+
+**Request (String Message):**
+```bash
+curl -X POST http://localhost:3002/publish \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topicName": "my-topic",
+    "message": "Hello World!",
+    "attributes": {
+      "priority": "high",
+      "source": "api"
+    }
+  }'
+```
+
+**Request (JSON Message):**
+```bash
+curl -X POST http://localhost:3002/publish \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topicName": "my-topic",
+    "message": {
+      "userId": "12345",
+      "action": "login",
+      "timestamp": "2025-12-17T06:00:00Z"
+    },
+    "attributes": {
+      "type": "user-event"
+    }
+  }'
+```
+
+**Response:**
+```json
+{
+  "message": "Message published successfully",
+  "messageId": "17393895727084501",
+  "topic": "my-topic"
+}
+```
+
+---
+
+### 5. Create Subscription
+**POST** `/subscriptions`
+
+Create a subscription and start listening for messages.
+
+**Request:**
+```bash
+curl -X POST http://localhost:3002/subscriptions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topicName": "my-topic",
+    "subscriptionName": "my-subscription"
+  }'
+```
+
+**Response:**
+```json
+{
+  "message": "Subscription created and listening for messages",
+  "subscription": "projects/essential-hawk-444711-m3/subscriptions/my-subscription",
+  "topic": "my-topic"
+}
+```
+
+**Server Console Output (when messages arrive):**
+```
+=== Received Message ===
+Message ID: 17393895727084501
+Data: "Hello World!"
+Attributes: {"priority":"high","source":"api"}
+Published: Wed Dec 17 2025 11:30:00 GMT+0530 (India Standard Time)
+========================
+```
+
+---
+
+### 6. List Subscriptions
+**GET** `/subscriptions`
+
+List all active subscriptions.
+
+**Request:**
+```bash
+curl http://localhost:3002/subscriptions
+```
+
+**Response:**
+```json
+{
+  "activeSubscriptions": [
+    "my-subscription",
+    "another-subscription"
+  ],
+  "count": 2
+}
+```
+
+---
+
+### 7. Delete Subscription
+**DELETE** `/subscriptions/:subscriptionName`
+
+Stop listening and delete a subscription.
+
+**Request:**
+```bash
+curl -X DELETE http://localhost:3002/subscriptions/my-subscription
+```
+
+**Response:**
+```json
+{
+  "message": "Subscription deleted successfully",
+  "subscription": "my-subscription"
+}
+```
+
+---
+
+## Testing Guide
+
+### Complete Workflow Test
+
+```bash
+# 1. Health check
+curl http://localhost:3002/health
+
+# 2. Create topic
+curl -X POST http://localhost:3002/topics \
+  -H "Content-Type: application/json" \
+  -d '{"topicName": "demo-topic"}'
+
+# 3. List topics
+curl http://localhost:3002/topics
+
+# 4. Create subscription (starts listening)
+curl -X POST http://localhost:3002/subscriptions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topicName": "demo-topic",
+    "subscriptionName": "demo-sub"
+  }'
+
+# 5. Publish test messages
+curl -X POST http://localhost:3002/publish \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topicName": "demo-topic",
+    "message": "Test message 1",
+    "attributes": {"test": "true"}
+  }'
+
+curl -X POST http://localhost:3002/publish \
+  -H "Content-Type: application/json" \
+  -d '{
+    "topicName": "demo-topic",
+    "message": {"data": "Test message 2", "count": 42},
+    "attributes": {"type": "json"}
+  }'
+
+# 6. List active subscriptions
+curl http://localhost:3002/subscriptions
+
+# 7. Clean up - delete subscription
+curl -X DELETE http://localhost:3002/subscriptions/demo-sub
+```
+
+### Load Testing
+
+Publish multiple messages rapidly:
+```bash
+for i in {1..10}; do
+  curl -X POST http://localhost:3002/publish \
+    -H "Content-Type: application/json" \
+    -d "{\"topicName\": \"demo-topic\", \"message\": \"Message $i\"}"
+done
+```
+
+---
+
+## Monitoring & Debugging
+
+### Local Monitoring (Emulator)
+
+**Server Logs:**
+- All messages are logged to console
+- Check Terminal 2 (where server is running)
+
+**Emulator Logs:**
+- Check Terminal 1 (where emulator is running)
+- Shows all Pub/Sub operations
+
+### Google Cloud Monitoring
+
+#### 1. Cloud Console Metrics
+
+**Topics:**
+```
+https://console.cloud.google.com/cloudpubsub/topic/list?project=YOUR_PROJECT_ID
+```
+
+Click on a topic to see:
+- Publish rate
+- Message size
+- Error rate
+
+**Subscriptions:**
+```
+https://console.cloud.google.com/cloudpubsub/subscription/list?project=YOUR_PROJECT_ID
+```
+
+Click on a subscription to see:
+- Delivery rate
+- Oldest unacked message age
+- Backlog size
+- Acknowledgment rate
+
+#### 2. Cloud Logging
+
+View detailed logs:
+```
+https://console.cloud.google.com/logs/query?project=YOUR_PROJECT_ID
+```
+
+Filter for Pub/Sub logs:
+```
+resource.type="pubsub_topic"
+OR resource.type="pubsub_subscription"
+```
+
+#### 3. Metrics Explorer
+
+Create custom dashboards:
+```
+https://console.cloud.google.com/monitoring/metrics-explorer?project=YOUR_PROJECT_ID
+```
+
+Useful metrics:
+- `pubsub.googleapis.com/topic/send_request_count`
+- `pubsub.googleapis.com/subscription/pull_request_count`
+- `pubsub.googleapis.com/subscription/num_undelivered_messages`
+
+---
+
+## Best Practices
+
+### 1. Message Design
+
+**Good:**
+```json
+{
+  "message": {
+    "eventType": "user.login",
+    "userId": "12345",
+    "timestamp": "2025-12-17T06:00:00Z",
+    "metadata": {
+      "ip": "192.168.1.1",
+      "userAgent": "Mozilla/5.0"
+    }
+  },
+  "attributes": {
+    "priority": "normal",
+    "source": "auth-service"
+  }
+}
+```
+
+**Avoid:**
+- Very large messages (>10MB)
+- Sensitive data without encryption
+- Missing timestamps
+- Unclear message structure
+
+### 2. Error Handling
+
+Always handle errors:
 ```javascript
-// Unique constraint: one guardrail config per agent
-db.guardrail_configs.createIndex(
-  { "agent_id": 1 }, 
-  { unique: true }
-)
-
-// Query optimization indexes
-db.guardrail_configs.createIndex({ "client_id": 1, "enabled": 1 })
-db.guardrail_configs.createIndex({ "created_by": 1 })
-db.guardrail_configs.createIndex({ "updated_at": 1 })
-```
-
-## 2. API Architecture
-
-### RESTful Endpoints
-
-```
-POST   /api/v1/agents/{agent_id}/guardrails     - Create guardrail config
-GET    /api/v1/agents/{agent_id}/guardrails     - Get guardrail config
-PUT    /api/v1/agents/{agent_id}/guardrails     - Update guardrail config
-DELETE /api/v1/agents/{agent_id}/guardrails     - Delete guardrail config
-POST   /api/v1/agents/{agent_id}/guardrails/validate - Validate config
-GET    /api/v1/agents/{agent_id}/guardrails/status   - Get status/health
-```
-
-### Request/Response Models
-
-```python
-# schemas/guardrail_schema.py
-
-class GuardrailCreationRequest(StrictBaseModel):
-    name: str = Field(..., min_length=1, max_length=100)
-    description: str | None = Field(None, max_length=500)
-    yaml_content: str = Field(..., min_length=1, description="YAML configuration content")
-    enabled: bool = True
-
-class GuardrailUpdateRequest(StrictBaseModel):
-    name: str | None = Field(None, min_length=1, max_length=100)
-    description: str | None = Field(None, max_length=500)
-    yaml_content: str | None = Field(None, min_length=1, description="YAML configuration content")
-    enabled: bool | None = None
-
-class GuardrailResponse(BaseModel):
-    id: str
-    agent_id: str
-    name: str
-    description: str | None
-    yaml_content: str
-    enabled: bool
-    created_by: str
-    created_at: datetime
-    updated_at: datetime
-
-class GuardrailValidationRequest(StrictBaseModel):
-    yaml_content: str = Field(..., min_length=1, description="YAML configuration to validate")
-
-class GuardrailValidationResponse(BaseModel):
-    valid: bool
-    errors: list[str] = []
-    warnings: list[str] = []
-    parsed_config: dict | None = None
-```
-
-## 3. Validation System
-
-### NeMo Guardrails Integration
-
-```python
-# services/guardrail_validation.py
-
-import yaml
-from nemoguardrails import RailsConfig
-from nemoguardrails.rails.llm.llmrails import LLMRails
-
-class GuardrailValidationService:
-    @staticmethod
-    async def validate_yaml_config(yaml_content: str) -> tuple[bool, list[str], list[str], dict | None]:
-        """
-        Validate YAML guardrail configuration using NeMo Guardrails
-        Returns: (is_valid, errors, warnings, parsed_config)
-        """
-        try:
-            # Parse YAML to dict
-            config_dict = yaml.safe_load(yaml_content)
-            if not isinstance(config_dict, dict):
-                return False, ["Invalid YAML: must be a dictionary/object"], [], None
-            
-            # Validate using NeMo Guardrails RailsConfig
-            rails_config = RailsConfig.from_content(config_dict)
-            
-            # Additional business rule validation
-            errors = []
-            warnings = []
-            
-            # Basic validation checks
-            if not config_dict.get("models"):
-                warnings.append("No models defined - using default model configuration")
-            
-            # Validate flow references if both flows and rails exist
-            flows = config_dict.get("flows", [])
-            rails = config_dict.get("rails", {})
-            
-            if flows and rails:
-                flow_ids = {flow.get("id") for flow in flows if flow.get("id")}
-                referenced_flows = set()
-                
-                for rail_type, rail_config in rails.items():
-                    if isinstance(rail_config, dict) and "flows" in rail_config:
-                        flows_list = rail_config["flows"]
-                        if isinstance(flows_list, list):
-                            referenced_flows.update(flows_list)
-                
-                missing_flows = referenced_flows - flow_ids
-                if missing_flows:
-                    errors.append(f"Referenced flows not defined: {list(missing_flows)}")
-            
-            return len(errors) == 0, errors, warnings, config_dict
-            
-        except yaml.YAMLError as e:
-            return False, [f"YAML parsing error: {str(e)}"], [], None
-        except Exception as e:
-            return False, [f"Configuration validation failed: {str(e)}"], [], None
-    
-    @staticmethod
-    def yaml_to_json(yaml_content: str) -> dict:
-        """Convert YAML content to JSON dict"""
-        try:
-            return yaml.safe_load(yaml_content)
-        except Exception as e:
-            raise ValueError(f"Failed to parse YAML: {str(e)}")
-    
-    @staticmethod
-    def json_to_yaml(config_dict: dict) -> str:
-        """Convert JSON dict back to YAML"""
-        try:
-            return yaml.dump(config_dict, default_flow_style=False, sort_keys=False)
-        except Exception as e:
-            raise ValueError(f"Failed to convert to YAML: {str(e)}")
-```
-
-## 4. Service Layer Design
-
-### Guardrail Service
-
-```python
-# services/guardrail_service.py
-
-class GuardrailService:
-    def __init__(self, db: AsyncIOMotorDatabase, cache_service: CacheService):
-        self.collection = db[CollectionNames.GUARDRAIL_CONFIGS]
-        self.cache = cache_service
-        self.validator = GuardrailValidationService()
-    
-    async def create_guardrail(
-        self,
-        agent_id: str,
-        request: GuardrailCreationRequest,
-        user_id: str,
-        source: dict
-    ) -> str:
-        """Create new guardrail configuration"""
-        
-        # Validate YAML configuration
-        is_valid, errors, warnings, config_json = await self.validator.validate_yaml_config(request.yaml_content)
-        if not is_valid:
-            raise HTTPException(400, {"message": "Invalid YAML configuration", "errors": errors})
-        
-        # Check if guardrail already exists for agent
-        existing = await self.collection.find_one({"agent_id": ObjectId(agent_id)})
-        if existing:
-            raise HTTPException(409, "Guardrail configuration already exists for this agent")
-        
-        # Create document
-        now = datetime.now(UTC)
-        doc = {
-            "agent_id": ObjectId(agent_id),
-            "name": request.name,
-            "description": request.description,
-            "yaml_content": request.yaml_content,
-            "config_json": config_json,
-            "enabled": request.enabled,
-            "created_by": user_id,
-            "created_at": now,
-            "updated_at": now,
-            **source
-        }
-        
-        result = await self.collection.insert_one(doc)
-        
-        # Invalidate cache
-        await self.cache.invalidate_guardrail(agent_id)
-        
-        return str(result.inserted_id)
-    
-    async def get_guardrail(self, agent_id: str) -> GuardrailResponse | None:
-        """Get guardrail configuration for agent"""
-        
-        # Try cache first
-        cached = await self.cache.get_guardrail(agent_id)
-        if cached:
-            return cached
-        
-        # Query database
-        doc = await self.collection.find_one({"agent_id": ObjectId(agent_id)})
-        if not doc:
-            return None
-        
-        response = GuardrailResponse(
-            id=str(doc["_id"]),
-            agent_id=str(doc["agent_id"]),
-            name=doc["name"],
-            description=doc.get("description"),
-            yaml_content=doc["yaml_content"],
-            enabled=doc["enabled"],
-            created_by=doc["created_by"],
-            created_at=doc["created_at"],
-            updated_at=doc["updated_at"]
-        )
-        
-        # Cache result
-        await self.cache.set_guardrail(agent_id, response)
-        
-        return response
-    
-    async def update_guardrail(
-        self,
-        agent_id: str,
-        request: GuardrailUpdateRequest,
-        user_id: str
-    ) -> None:
-        """Update guardrail configuration"""
-        
-        # Validate if YAML config is being updated
-        config_json = None
-        if request.yaml_content:
-            is_valid, errors, warnings, config_json = await self.validator.validate_yaml_config(request.yaml_content)
-            if not is_valid:
-                raise HTTPException(400, {"message": "Invalid YAML configuration", "errors": errors})
-        
-        # Build update document
-        update_doc = {"updated_at": datetime.now(UTC)}
-        if request.name is not None:
-            update_doc["name"] = request.name
-        if request.description is not None:
-            update_doc["description"] = request.description
-        if request.yaml_content is not None:
-            update_doc["yaml_content"] = request.yaml_content
-            update_doc["config_json"] = config_json
-        if request.enabled is not None:
-            update_doc["enabled"] = request.enabled
-        
-        result = await self.collection.update_one(
-            {"agent_id": ObjectId(agent_id)},
-            {"$set": update_doc}
-        )
-        
-        if result.matched_count == 0:
-            raise HTTPException(404, "Guardrail configuration not found")
-        
-        # Invalidate cache
-        await self.cache.invalidate_guardrail(agent_id)
-    
-    async def delete_guardrail(self, agent_id: str) -> None:
-        """Delete guardrail configuration"""
-        
-        result = await self.collection.delete_one({"agent_id": ObjectId(agent_id)})
-        if result.deleted_count == 0:
-            raise HTTPException(404, "Guardrail configuration not found")
-        
-        # Invalidate cache
-        await self.cache.invalidate_guardrail(agent_id)
-```
-
-## 5. Permission System Integration
-
-### Following Existing Patterns
-
-```python
-# middlewares/guardrail_authorization.py
-
-async def check_guardrail_access(
-    agent_id: str,
-    operation: Literal["create", "read", "update", "delete"],
-    req: Request
-) -> dict:
-    """
-    Check guardrail access permissions following agent CRUD patterns
-    """
-    
-    # Reuse existing agent access check
-    agent = await check_update_access_function("agents", "agent", True)(req, agent_id)
-    
-    # Additional guardrail-specific checks if needed
-    if operation in ["create", "update", "delete"]:
-        await get_authorization_function("create", agent["availability_level"], agent_id)(req)
-    else:
-        await get_authorization_function("read", agent["availability_level"], agent_id)(req)
-    
-    return agent
-```
-
-## 6. LLM Integration Architecture
-
-### ChatOpenAI Wrapper with Guardrails
-
-```python
-# utils/guardrail_llm_wrapper.py
-
-from nemoguardrails.rails.llm.llmrails import LLMRails
-from nemoguardrails import RailsConfig
-
-class GuardrailLLMWrapper:
-    def __init__(self, base_llm: ChatOpenAI, guardrail_config: GuardrailConfig | None = None):
-        self.base_llm = base_llm
-        self.guardrail_config = guardrail_config
-        self._rails_instance = None
-        
-        if guardrail_config:
-            self._initialize_rails()
-    
-    def _initialize_rails(self):
-        """Initialize NeMo Guardrails instance"""
-        try:
-            # Convert JSON config back to dict for NeMo Guardrails
-            rails_config = RailsConfig.from_content(self.guardrail_config)
-            self._rails_instance = LLMRails(config=rails_config, llm=self.base_llm)
-        except Exception as e:
-            logger.error(f"Failed to initialize guardrails: {e}")
-            self._rails_instance = None
-    
-    async def ainvoke(self, messages, config=None, **kwargs):
-        """Async invoke with guardrails"""
-        if self._rails_instance and self.guardrail_config:
-            try:
-                # Use guardrails
-                response = await self._rails_instance.generate_async(
-                    messages=messages,
-                    **kwargs
-                )
-                return response
-            except Exception as e:
-                logger.error(f"Guardrail execution failed, falling back to base LLM: {e}")
-                # Fallback to base LLM
-                return await self.base_llm.ainvoke(messages, config, **kwargs)
-        else:
-            # No guardrails, use base LLM
-            return await self.base_llm.ainvoke(messages, config, **kwargs)
-
-# Integration in existing LLM creation
-async def create_guardrail_enabled_llm(
-    agent: dict,
-    llm_config: LLM_CONFIG,
-    source: dict
-) -> ChatOpenAI | GuardrailLLMWrapper:
-    """Create LLM instance with optional guardrails"""
-    
-    # Create base LLM (existing logic)
-    base_llm = ChatOpenAI(
-        model=llm_config.llm or agent.get("llm"),
-        base_url=os.getenv("LLM_BASE_URL"),
-        api_key="DUMMY_VALUE",
-        temperature=llm_config.temperature,
-        top_p=llm_config.top_p,
-        max_completion_tokens=llm_config.max_completion_tokens,
-        default_headers={
-            HEADER_KEYS.get("ENTERPRISE_API_INTERNAL_HEADER"): os.getenv(
-                ENV_KEYS.get("INTERSERVICES_SHARED_SECRET")
-            ),
-            HEADER_KEYS.get("CONFIG_SOURCE_CLIENT"): source.get("client"),
-        },
-        model_kwargs=model_kwargs if 'model_kwargs' in locals() else {}
-    )
-    
-    # Check for guardrail configuration
-    guardrail_service = GuardrailService(await MongodbConfig.get_db(), cache_service)
-    guardrail_config = await guardrail_service.get_guardrail(str(agent["_id"]))
-    
-    if guardrail_config and guardrail_config.enabled:
-        # Convert YAML back to dict for NeMo Guardrails
-        config_dict = guardrail_service.validator.yaml_to_json(guardrail_config.yaml_content)
-        return GuardrailLLMWrapper(base_llm, config_dict)
-    else:
-        return base_llm
-```
-
-## 7. Caching Strategy
-
-### Redis-based Caching
-
-```python
-# services/guardrail_cache.py
-
-class GuardrailCacheService:
-    def __init__(self, redis_client):
-        self.redis = redis_client
-        self.ttl = 3600  # 1 hour
-    
-    async def get_guardrail(self, agent_id: str) -> GuardrailResponse | None:
-        """Get cached guardrail configuration"""
-        key = f"guardrail:{agent_id}"
-        cached = await self.redis.get(key)
-        
-        if cached:
-            try:
-                data = json.loads(cached)
-                return GuardrailResponse(**data)
-            except Exception as e:
-                logger.warning(f"Failed to deserialize cached guardrail: {e}")
-                await self.redis.delete(key)
-        
-        return None
-    
-    async def set_guardrail(self, agent_id: str, config: GuardrailResponse) -> None:
-        """Cache guardrail configuration"""
-        key = f"guardrail:{agent_id}"
-        data = config.dict()
-        
-        # Convert datetime objects to ISO strings for JSON serialization
-        data["created_at"] = data["created_at"].isoformat()
-        data["updated_at"] = data["updated_at"].isoformat()
-        
-        await self.redis.setex(key, self.ttl, json.dumps(data))
-    
-    async def invalidate_guardrail(self, agent_id: str) -> None:
-        """Remove guardrail from cache"""
-        key = f"guardrail:{agent_id}"
-        await self.redis.delete(key)
-```
-
-## 8. Error Handling and Response Formats
-
-### Standardized Error Responses
-
-```python
-# Error response formats following existing patterns
-
-class GuardrailErrorResponse(BaseModel):
-    message: str
-    errors: list[str] = []
-    warnings: list[str] = []
-    error_code: str | None = None
-
-# Common error scenarios
-GUARDRAIL_ERRORS = {
-    "INVALID_CONFIG": "Invalid guardrail configuration",
-    "AGENT_NOT_FOUND": "Agent not found",
-    "GUARDRAIL_EXISTS": "Guardrail configuration already exists for this agent",
-    "GUARDRAIL_NOT_FOUND": "Guardrail configuration not found",
-    "VALIDATION_FAILED": "Configuration validation failed",
-    "NEMO_INTEGRATION_ERROR": "NeMo Guardrails integration error"
+try {
+  const messageId = await topic.publishMessage({
+    data: dataBuffer,
+    attributes: attributes
+  });
+} catch (error) {
+  console.error('Publish failed:', error);
+  // Implement retry logic or dead letter queue
 }
 ```
 
-## 9. Integration Points
+### 3. Subscription Management
 
-### Existing Agent Execution Flow
+- Use meaningful subscription names
+- Set appropriate acknowledgment deadlines
+- Monitor unacknowledged messages
+- Implement dead letter topics for failed messages
 
-```mermaid
-graph LR
-    subgraph "Current Flow"
-        A[Agent Request] --> B[Create ChatOpenAI]
-        B --> C[Execute Agent]
-        C --> D[Return Response]
-    end
-    
-    subgraph "Enhanced Flow"
-        A1[Agent Request] --> B1[Load Guardrail Config]
-        B1 --> C1[Create Guardrail-Enabled LLM]
-        C1 --> D1[Execute Agent with Guardrails]
-        D1 --> E1[Return Response]
-    end
+### 4. Security
+
+**Local Development:**
+- Use emulator (no credentials needed)
+- Never commit `.env` files
+
+**Production:**
+- Use service accounts with minimal permissions
+- Rotate keys regularly
+- Store credentials securely (not in code)
+- Use Secret Manager for sensitive data
+
+### 5. Cost Optimization
+
+- Delete unused topics and subscriptions
+- Use message filtering when possible
+- Set appropriate message retention
+- Monitor quota usage
+
+---
+
+## Troubleshooting
+
+### Common Issues
+
+#### 1. "Could not load the default credentials"
+
+**Cause:** Missing or incorrect `GOOGLE_APPLICATION_CREDENTIALS`
+
+**Solution:**
+```bash
+# Check if file exists
+ls -la $GOOGLE_APPLICATION_CREDENTIALS
+
+# Verify path in .env
+cat .env | grep GOOGLE_APPLICATION_CREDENTIALS
+
+# Set correct path
+export GOOGLE_APPLICATION_CREDENTIALS="/correct/path/to/key.json"
 ```
 
-### Minimal Integration Changes
+#### 2. "API has not been used in project"
 
-The integration will be implemented with minimal changes to existing code:
+**Cause:** Pub/Sub API not enabled
 
-1. **LLM Creation**: Replace `ChatOpenAI` instantiation with `create_guardrail_enabled_llm()`
-2. **Agent Execution**: No changes needed - guardrails are transparent
-3. **Error Handling**: Enhanced error reporting for guardrail failures
+**Solution:**
+```
+https://console.developers.google.com/apis/api/pubsub.googleapis.com/overview?project=YOUR_PROJECT_ID
+```
+Click "Enable"
 
-## 10. Database Migration
+#### 3. "Permission denied"
 
-### Migration Script
+**Cause:** Service account lacks permissions
 
-```python
-# migrations/agents_db/20241127000000-add_guardrail_configs.py
+**Solution:**
+1. Go to IAM & Admin > IAM
+2. Find your service account
+3. Add "Pub/Sub Admin" role
 
-async def upgrade():
-    """Add guardrail_configs collection and indexes"""
-    db = await MongodbConfig.get_db()
-    
-    # Create collection if it doesn't exist
-    if "guardrail_configs" not in await db.list_collection_names():
-        await db.create_collection("guardrail_configs")
-    
-    collection = db["guardrail_configs"]
-    
-    # Create indexes
-    await collection.create_index(
-        [("agent_id", 1)], 
-        unique=True, 
-        name="idx_agent_id_unique"
-    )
-    
-    await collection.create_index(
-        [("client_id", 1), ("enabled", 1)], 
-        name="idx_client_enabled"
-    )
-    
-    await collection.create_index(
-        [("created_by", 1)], 
-        name="idx_created_by"
-    )
-    
-    await collection.create_index(
-        [("updated_at", 1)], 
-        name="idx_updated_at"
-    )
+#### 4. "Connection refused" (Emulator)
 
-async def downgrade():
-    """Remove guardrail_configs collection"""
-    db = await MongodbConfig.get_db()
-    await db.drop_collection("guardrail_configs")
+**Cause:** Emulator not running
+
+**Solution:**
+```bash
+# Start emulator
+gcloud beta emulators pubsub start --project=test-project
+
+# Verify it's running
+lsof -i :8085
 ```
 
-## Summary
+#### 5. Messages not received
 
-This architecture provides:
+**Checklist:**
+- ✅ Subscription created successfully?
+- ✅ Publishing to correct topic?
+- ✅ Server console showing subscription created?
+- ✅ No errors in server logs?
 
-1. **Comprehensive CRUD Operations**: Full lifecycle management of guardrail configurations
-2. **Seamless Integration**: Minimal changes to existing agent execution flow
-3. **Robust Validation**: Immediate validation using NeMo Guardrails
-4. **Performance Optimization**: Redis caching for frequently accessed configurations
-5. **Security**: Permission system aligned with existing agent CRUD patterns
-6. **Scalability**: Efficient database schema with proper indexing
-7. **Error Handling**: Comprehensive error reporting and graceful fallbacks
-8. **Maintainability**: Clean separation of concerns and modular design
+**Debug:**
+```bash
+# Check active subscriptions
+curl http://localhost:3002/subscriptions
+
+# Verify topic exists
+curl http://localhost:3002/topics
+
+# Try publishing again
+curl -X POST http://localhost:3002/publish \
+  -H "Content-Type: application/json" \
+  -d '{"topicName": "your-topic", "message": "test"}'
+```
+
+---
+
+## Switching Between Emulator and Cloud
+
+### From Emulator to Cloud
+
+1. Stop the server (Ctrl+C)
+2. Update `.env`:
+   ```env
+   GOOGLE_CLOUD_PROJECT_ID=essential-hawk-444711-m3
+   GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json
+   # PUBSUB_EMULATOR_HOST=localhost:8085  # Comment this out
+   PORT=3002
+   ```
+3. Restart server: `npm start`
+
+### From Cloud to Emulator
+
+1. Stop the server (Ctrl+C)
+2. Start emulator (if not running):
+   ```bash
+   gcloud beta emulators pubsub start --project=test-project
+   ```
+3. Update `.env`:
+   ```env
+   GOOGLE_CLOUD_PROJECT_ID=test-project
+   PUBSUB_EMULATOR_HOST=localhost:8085
+   # GOOGLE_APPLICATION_CREDENTIALS=/path/to/key.json  # Comment this out
+   PORT=3002
+   ```
+4. Restart server: `npm start`
+
+---
+
+## Additional Resources
+
+### Documentation
+- [Google Cloud Pub/Sub Docs](https://cloud.google.com/pubsub/docs)
+- [Node.js Client Library](https://googleapis.dev/nodejs/pubsub/latest/)
+- [Pub/Sub Best Practices](https://cloud.google.com/pubsub/docs/publisher)
+
+### Tools
+- [Pub/Sub Emulator](https://cloud.google.com/pubsub/docs/emulator)
+- [gcloud CLI](https://cloud.google.com/sdk/gcloud)
+- [Postman Collection](https://www.postman.com/) - Import endpoints for testing
+
+### Support
+- [Stack Overflow](https://stackoverflow.com/questions/tagged/google-cloud-pubsub)
+- [Google Cloud Community](https://www.googlecloudcommunity.com/)
+- [GitHub Issues](https://github.com/googleapis/nodejs-pubsub/issues)
+
+---
+
+## Conclusion
+
+This POC demonstrates a complete Google Pub/Sub implementation with:
+- ✅ Dual environment support (Local + Cloud)
+- ✅ RESTful API interface
+- ✅ Real-time message processing
+- ✅ Production-ready error handling
+- ✅ Comprehensive documentation
+
+**Next Steps:**
+1. Explore message filtering
+2. Implement dead letter queues
+3. Add message ordering
+4. Set up monitoring alerts
+5. Implement retry policies
+6. Add authentication to API endpoints
+
+---
+
+**Last Updated:** December 17, 2025  
+**Version:** 1.0.0  
+**Author:** POC Development Team
