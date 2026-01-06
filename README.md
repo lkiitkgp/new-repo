@@ -122,28 +122,7 @@ NeMo Guardrails expects a linear conversation flow, but this system has:
 - Degraded user experience for real-time applications
 - Conflicts with existing token usage tracking
 
-### 4. **Feature Overlap & Redundancy**
-
-**NeMo Guardrails Features:**
-- Input validation (jailbreak detection)
-- Output moderation (fact-checking, hallucination detection)
-- Topic control (allowed/disallowed topics)
-- Dialog management
-
-**Already Implemented in This Project:**
-- ✅ Input validation via Pydantic schemas
-- ✅ Output validation via JSON Schema
-- ✅ HITL for human oversight
-- ✅ Tool execution controls
-- ✅ System prompt engineering for behavior control
-
-**Redundancy Issues:**
-- Duplicate validation layers increase complexity
-- Conflicting error handling mechanisms
-- Unclear responsibility boundaries
-- Maintenance burden for two systems
-
-### 5. **Customization Limitations**
+### 4. **Customization Limitations**
 
 **NeMo Guardrails Constraints:**
 - Colang DSL learning curve for team
@@ -157,7 +136,7 @@ NeMo Guardrails expects a linear conversation flow, but this system has:
 - Leverage existing checkpointing for guardrail state
 - Client-specific guardrail configurations
 
-### 6. **Operational Complexity**
+### 5. **Operational Complexity**
 
 **NeMo Guardrails Operations:**
 - Separate configuration management (Colang files)
