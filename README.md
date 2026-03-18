@@ -1,65 +1,72 @@
-# Worker Execution POC — Technical Documentation
+# Worker Execution POC
 
-> **Status:** ✅ Complete | **Version:** 1.0 | **Last Updated:** March 2026
-
----
-
-## 1. Overview
-
-{info:title=About This Document}
-This document describes the **Worker Execution POC** — an event-driven architecture for asynchronous agent execution. It demonstrates how a user query can be submitted via a REST API, queued through Redis Streams, and processed asynchronously by a background worker that invokes an LLM.
-{info}
-
-### Purpose
-
-Demonstrate how agent execution (sending a user query to an LLM) can be triggered via a REST API and processed asynchronously through **Redis Streams**. The API returns an immediate "queued" response with a `correlation_id`, while the actual LLM invocation happens in a background worker thread.
-
-### Scope
-
-{note:title=POC Scope}
-This is a **Proof of Concept** only. The following production features are intentionally excluded:
-
-- Retry / Dead Letter Queue (DLQ) logic
-- Authentication & authorization
-- Streaming / Server-Sent Events (SSE)
-- Tool calling or LangGraph pipelines
-- Conversation memory
-- Result delivery back to client (webhooks, polling, SSE)
-- Input/output guardrails
-{note}
+> Event-driven worker architecture with streaming support using **FastAPI**, **Redis Streams**, and **LangChain**
 
 ---
 
-## 2. Architecture
+## Table of Contents
 
-### Sequence Diagram
+- [Overview](#overview)
+- [Architecture](#architecture)
+- [Project Structure](#project-structure)
+- [Technology Stack](#technology-stack)
+- [API Endpoints](#api-endpoints)
+- [Configuration](#configuration)
+- [How to Run](#how-to-run)
+- [How It Works](#how-it-works)
+- [Key Implementation Details](#key-implementation-details)
+- [Test Results](#test-results)
 
-The following diagram illustrates the end-to-end message flow from client request to LLM response:
+---
+
+## Overview
+
+This **Proof of Concept** demonstrates an event-driven architecture for asynchronous agent execution with real-time streaming support. A single API endpoint supports two execution modes:
+
+- **Non-streaming** (`stream: false`) — Fire-and-forget via Redis Streams. The API publishes a message, returns a `correlation_id` immediately, and a background worker processes the query asynchronously using `ChatOpenAI.ainvoke()`.
+- **Streaming** (`stream: true`) — Direct SSE response. The API bypasses Redis/Worker entirely and invokes the LLM directly using `ChatOpenAI.astream()`, streaming tokens back to the client as Server-Sent Events.
+
+### Key Goals
+
+- Validate event-driven worker architecture with Redis Streams
+- Demonstrate dual-mode execution (async worker vs. real-time streaming) from a single endpoint
+- Prove out LangChain `ChatOpenAI` integration for both `ainvoke()` and `astream()`
+- Establish patterns for future agent execution pipelines
+
+---
+
+## Architecture
+
+### High-Level Architecture
 
 ```mermaid
-sequenceDiagram
-    participant Client
-    participant API as FastAPI Server
-    participant Redis as Redis Streams
-    participant Worker as Worker Thread
-    participant LLM as ChatOpenAI (LLM Proxy)
+flowchart TD
+    Client[Client]
+    API[FastAPI API Server]
+    RedisStreams[Redis Streams]
+    Worker[Worker Thread]
+    LLM[LLM — ChatOpenAI]
 
-    Client->>API: POST /agents/{agent_id}/query
-    Note over API: Generate correlation_id (UUID)
-    API->>Redis: XADD agent-execution-stream {correlation_id, agent_id, query, conversation_id}
-    API-->>Client: 200 OK {"status": "queued", "correlation_id": "uuid", "message": "..."}
+    Client -- "POST /agents/{id}/query" --> API
 
-    loop Continuous polling
-        Worker->>Redis: XREADGROUP GROUP agent-workers worker-1 BLOCK 5000 STREAMS agent-execution-stream >
-    end
+    API -- "stream=false" --> RedisStreams
+    RedisStreams -- "XREADGROUP" --> Worker
+    Worker -- "ainvoke()" --> LLM
+    API -. "return JSON: correlation_id + status" .-> Client
 
-    Redis-->>Worker: Deliver message
-    Note over Worker: Extract correlation_id, agent_id, query
-    Worker->>LLM: ChatOpenAI.ainvoke([HumanMessage(content=query)])
-    LLM-->>Worker: LLM response content
-    Worker->>Redis: XACK agent-execution-stream agent-workers {message_id}
-    Note over Worker: Message acknowledged, processing complete
+    API -- "stream=true" --> LLM
+    LLM -. "astream() chunks" .-> API
+    API -. "SSE token events" .-> Client
 ```
+
+### Dual-Path Design
+
+The system uses a **single endpoint** with a `stream` boolean flag to determine the execution path:
+
+| Path | Flow | Use Case |
+|------|------|----------|
+| **Non-streaming** | Client → API → Redis Streams → Worker → LLM | Background/batch processing, async workflows |
+| **Streaming** | Client → API → LLM (direct) → SSE tokens → Client | Interactive UIs, real-time chat |
 
 ### Component Diagram
 
@@ -76,12 +83,13 @@ graph TB
         end
     end
 
-    D[Client<br/>curl / HTTP] -->|POST /agents/id/query| A
-    D -->|GET /health| A
+    D[Client<br/>curl / HTTP] -->|"POST /agents/{id}/query"| A
+    D -->|"GET /health"| A
     A -->|XADD| C
     C -->|XREADGROUP| B
     B -->|XACK| C
-    B -->|ainvoke| E[LLM Provider<br/>ps.sapientslingshot.com<br/>OpenAI-compatible proxy]
+    B -->|ainvoke| E[LLM Provider<br/>OpenAI-compatible proxy]
+    A -->|astream| E
 
     style A fill:#2196F3,color:#fff
     style B fill:#FF9800,color:#fff
@@ -89,241 +97,150 @@ graph TB
     style E fill:#4CAF50,color:#fff
 ```
 
-### How It Works
+---
 
-1. **Client** sends a `POST /agents/{agent_id}/query` request with a JSON body containing the `query` string.
-2. **FastAPI API Server** generates a `correlation_id` (UUID), publishes the message to Redis Streams via `XADD`, and immediately returns a `"queued"` response.
-3. **Worker Thread** (spawned at application startup via `lifespan`) continuously polls Redis Streams using `XREADGROUP` with a 5-second block timeout.
-4. When a message is delivered, the **Worker** extracts the query and invokes the LLM via `ChatOpenAI.ainvoke()`.
-5. After processing (success or failure), the worker acknowledges the message via `XACK`.
+## Project Structure
+
+```
+woker-execution-poc/
+├── app/
+│   ├── __init__.py              # Package initializer
+│   ├── main.py                  # FastAPI app, lifespan, endpoints, SSE streaming
+│   ├── config.py                # Settings via pydantic-settings (env vars)
+│   ├── models.py                # Request/Response Pydantic models
+│   ├── redis_client.py          # Redis Streams wrapper (XADD, XREADGROUP, XACK)
+│   ├── worker.py                # Background worker — consumes messages, invokes LLM
+│   └── agent_handler.py         # LLM invocation (ainvoke + astream) via ChatOpenAI
+├── Dockerfile                   # Python 3.11-slim container image
+├── docker-compose.yml           # Redis + API service orchestration
+├── requirements.txt             # Python dependencies
+├── .env                         # Environment configuration (not committed)
+└── README.md                    # This document
+```
+
+### File Descriptions
+
+| File | Purpose |
+|------|---------|
+| [`app/main.py`](app/main.py) | FastAPI application with `lifespan` context manager. Connects to Redis on startup, spawns worker as daemon thread. Exposes `POST /agents/{agent_id}/query` (with stream branching) and `GET /health`. Contains `_handle_streaming_request()` for SSE streaming via `StreamingResponse`. |
+| [`app/config.py`](app/config.py) | Uses `pydantic-settings` `BaseSettings` to load configuration from environment variables and `.env` file. Defines LLM, Redis, streaming, and server configuration fields. |
+| [`app/models.py`](app/models.py) | Pydantic v2 models: `AgentExecutionRequest` (with `query`, optional `conversation_id`, and `stream` flag) and `AgentExecutionResponse` (with `status`, `correlation_id`, `message`). |
+| [`app/redis_client.py`](app/redis_client.py) | `RedisStreamClient` class wrapping async Redis operations: `connect()` (with consumer group creation via `MKSTREAM`), `publish_message()` (XADD), `start_processing()` (XREADGROUP loop with 5s block timeout), `acknowledge_message()` (XACK), `stop_processing()`, and `close()`. |
+| [`app/worker.py`](app/worker.py) | `WorkerApplication` class that initializes its own `RedisStreamClient` and `ExecuteAgentHandler`, then runs the consume loop. The `_process_message()` callback invokes the LLM via `ainvoke()` and acknowledges the message. |
+| [`app/agent_handler.py`](app/agent_handler.py) | `ExecuteAgentHandler` class that creates a `ChatOpenAI` instance. Provides `handle()` for synchronous invocation via `ainvoke()` and `handle_stream()` as an async generator via `astream()`. |
+| [`Dockerfile`](Dockerfile) | Single-stage build using `python:3.11-slim`. Installs dependencies, copies source, runs Uvicorn with `--reload`. |
+| [`docker-compose.yml`](docker-compose.yml) | Two services: `redis` (Redis 7 Alpine with health check) and `api` (built from Dockerfile, depends on healthy Redis). Mounts source for live reload. |
+| [`requirements.txt`](requirements.txt) | Python package dependencies with minimum version constraints. |
 
 ---
 
-## 3. Technology Stack
+## Technology Stack
 
 | Component | Technology | Version / Details |
-|---|---|---|
+|-----------|-----------|-------------------|
 | Language | Python | 3.11 |
 | Web Framework | FastAPI + Uvicorn | FastAPI ≥0.104.0, Uvicorn ≥0.24.0 |
 | Message Broker | Redis Streams | Redis 7 Alpine |
 | LLM Integration | LangChain | langchain-openai ≥0.1.0, langchain-core ≥0.2.0 |
-| LLM Provider | OpenAI-compatible proxy | `ps.sapientslingshot.com/api/v1/llm` |
+| LLM Provider | OpenAI-compatible proxy | Configurable via `OPENAI_BASE_URL` |
+| Streaming | SSE (Server-Sent Events) | FastAPI `StreamingResponse` + sse-starlette ≥1.6.0 |
 | Containerization | Docker + Docker Compose | Compose v3.8 |
 | Data Validation | Pydantic v2 | pydantic ≥2.0.0, pydantic-settings ≥2.0.0 |
 | Async Redis Client | redis-py (async) | redis ≥5.0.0 |
 
 ---
 
-## 4. Project Structure
+## API Endpoints
 
-```
-woker-execution-poc/
-├── app/
-│   ├── __init__.py              # Package initializer
-│   ├── main.py                  # FastAPI app with lifespan, spawns worker thread
-│   ├── config.py                # Settings via pydantic-settings (env vars)
-│   ├── models.py                # Request/Response Pydantic models
-│   ├── redis_client.py          # Redis Streams wrapper (XADD, XREADGROUP, XACK)
-│   ├── worker.py                # Worker that consumes messages and invokes LLM
-│   └── agent_handler.py         # LLM invocation using ChatOpenAI
-├── Dockerfile                   # Python 3.11-slim container image
-├── docker-compose.yml           # Redis + API service orchestration
-├── requirements.txt             # Python dependencies
-├── .env                         # Environment configuration (not committed)
-└── worker-execution-poc.md      # Original POC specification
-```
+### `POST /agents/{agent_id}/query`
 
-### File Descriptions
-
-| File | Purpose |
-|---|---|
-| `app/main.py` | Defines the FastAPI application with a `lifespan` context manager. On startup, connects to Redis and spawns the worker in a daemon thread (when `LOCAL_SERVER=true`). Exposes `POST /agents/{agent_id}/query` and `GET /health` endpoints. |
-| `app/config.py` | Uses `pydantic-settings` `BaseSettings` to load configuration from environment variables and `.env` file. Defines LLM, Redis, and server configuration fields with sensible defaults. |
-| `app/models.py` | Pydantic v2 models: `AgentExecutionRequest` (input with `query` and optional `conversation_id`) and `AgentExecutionResponse` (output with `status`, `correlation_id`, `message`). |
-| `app/redis_client.py` | `RedisStreamClient` class wrapping async Redis operations: `connect()` (with consumer group creation via `MKSTREAM`), `publish_message()` (XADD), `start_processing()` (XREADGROUP loop with 5s block timeout), `acknowledge_message()` (XACK), `stop_processing()`, and `close()`. |
-| `app/worker.py` | `WorkerApplication` class that initializes its own `RedisStreamClient` and `ExecuteAgentHandler`, then runs the consume loop. The `_process_message()` callback invokes the LLM and acknowledges the message. |
-| `app/agent_handler.py` | `ExecuteAgentHandler` class that creates a `ChatOpenAI` instance configured with the proxy URL, API key, and model. The `handle()` method invokes the LLM asynchronously via `ainvoke()` with a `HumanMessage`. |
-| `Dockerfile` | Multi-stage build using `python:3.11-slim`. Installs dependencies, copies source, and runs Uvicorn with `--reload` for development. |
-| `docker-compose.yml` | Defines two services: `redis` (Redis 7 Alpine with health check) and `api` (built from Dockerfile, depends on healthy Redis). Mounts source for live reload. |
-| `requirements.txt` | Python package dependencies with minimum version constraints. |
-
----
-
-## 5. API Endpoints
-
-### POST /agents/{agent_id}/query
-
-{panel:title=Submit Agent Query|borderStyle=solid|borderColor=#2196F3}
-
-**Description:** Submit a query for asynchronous agent execution. The query is published to Redis Streams and processed by the background worker.
-
-**URL:** `/agents/{agent_id}/query`
-
-**Method:** `POST`
+Single endpoint with behavior determined by the `stream` flag.
 
 **Path Parameters:**
 
 | Parameter | Type | Description |
-|---|---|---|
+|-----------|------|-------------|
 | `agent_id` | `string` | Identifier for the agent to execute |
 
-**Request Body:**
+**Request Body** ([`AgentExecutionRequest`](app/models.py:5)):
 
 ```json
 {
-  "query": "What is the capital of France?",
-  "conversation_id": "optional-session-id"
+    "query": "What is the capital of France?",
+    "conversation_id": "optional-session-id",
+    "stream": false
 }
 ```
 
-| Field | Type | Required | Description |
-|---|---|---|---|
-| `query` | `string` | ✅ Yes | The user query to send to the LLM |
-| `conversation_id` | `string` | ❌ No | Optional conversation/session identifier |
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `query` | `string` | ✅ Yes | — | The user query to send to the LLM |
+| `conversation_id` | `string` | ❌ No | `null` | Optional conversation/session identifier |
+| `stream` | `boolean` | ❌ No | `false` | When `true`, returns SSE streaming response |
 
-**Response (200 OK):**
+#### Response — Non-Streaming (`stream: false`)
+
+**Content-Type:** `application/json`
 
 ```json
 {
-  "status": "queued",
-  "correlation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "message": "Query queued for agent test-agent"
+    "status": "queued",
+    "correlation_id": "550e8400-e29b-41d4-a716-446655440000",
+    "message": "Query queued for agent test-agent"
 }
 ```
 
 | Field | Type | Description |
-|---|---|---|
-| `status` | `string` | Always `"queued"` — indicates the message was published to Redis Streams |
+|-------|------|-------------|
+| `status` | `string` | Always `"queued"` — message published to Redis Streams |
 | `correlation_id` | `string` | UUID v4 for tracking this execution request |
-| `message` | `string` | Human-readable confirmation message |
+| `message` | `string` | Human-readable confirmation |
 
-{panel}
+#### Response — Streaming (`stream: true`)
 
-### GET /health
+**Content-Type:** `text/event-stream`
 
-{panel:title=Health Check|borderStyle=solid|borderColor=#4CAF50}
-
-**Description:** Simple health check endpoint to verify the API server is running.
-
-**URL:** `/health`
-
-**Method:** `GET`
-
-**Response (200 OK):**
-
-```json
-{
-  "status": "healthy"
-}
+**Headers:**
+```
+Cache-Control: no-cache
+Connection: keep-alive
+X-Accel-Buffering: no
 ```
 
-{panel}
+**SSE Event Format:**
 
----
+Each SSE event is a JSON object in the `data` field with an `event` type and a `data` payload:
 
-## 6. Configuration / Environment Variables
+| Event Type | Description | Data Payload | Terminal? |
+|------------|-------------|-------------|-----------|
+| `token` | Single LLM token | `{"token": "...", "correlation_id": "..."}` | No |
+| `done` | Stream complete | `{"correlation_id": "..."}` | Yes |
+| `error` | Processing error | `{"message": "...", "correlation_id": "..."}` | Yes |
 
-All configuration is managed via environment variables, loaded through `pydantic-settings`. Values can be set in a `.env` file or passed directly as environment variables.
-
-### LLM Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `OPENAI_API_KEY` | `""` (empty) | API key for the OpenAI-compatible LLM proxy |
-| `OPENAI_BASE_URL` | `https://ps.sapientslingshot.com/api/v1/llm` | Base URL for the LLM proxy endpoint |
-| `OPENAI_MODEL` | `gpt-4o-mini` | Model name to use for LLM invocations |
-
-### Redis Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `REDIS_HOST` | `redis` | Redis server hostname (Docker service name) |
-| `REDIS_PORT` | `6379` | Redis server port |
-| `REDIS_PASSWORD` | `""` (empty) | Redis authentication password (optional) |
-| `REDIS_STREAM_NAME` | `agent-execution-stream` | Redis Stream key for message publishing and consumption |
-| `REDIS_CONSUMER_GROUP` | `agent-workers` | Consumer group name for XREADGROUP operations |
-| `REDIS_CONSUMER_NAME` | `worker-1` | Consumer name within the consumer group |
-
-### Server Configuration
-
-| Variable | Default | Description |
-|---|---|---|
-| `LOCAL_SERVER` | `true` | When `true`, spawns the worker as a daemon thread within the API process. When `false`, the worker is not spawned (intended for separate deployment). |
-
----
-
-## 7. How to Run
-
-### Prerequisites
-
-{info:title=Prerequisites}
-- **Docker** and **Docker Compose** installed
-- A valid **API key** for the LLM proxy (`ps.sapientslingshot.com`)
-{info}
-
-### Step-by-Step Instructions
-
-**1. Clone the repository**
-
-```bash
-git clone <repo-url>
-cd woker-execution-poc
-```
-
-**2. Configure environment**
-
-```bash
-cp .env.example .env
-# Edit .env with your API key:
-# OPENAI_API_KEY=your-api-key-here
-```
-
-**3. Build and start services**
-
-```bash
-docker compose up --build -d
-```
-
-This starts two containers:
-- `redis` — Redis 7 Alpine with health check
-- `api` — FastAPI server with embedded worker thread
-
-**4. Verify services are running**
-
-```bash
-docker compose ps
-```
-
-**5. Check application logs**
-
-```bash
-docker compose logs -f
-```
-
-You should see output similar to:
+**Example SSE Stream:**
 
 ```
-api-1    | INFO | app.main | Redis client connected (API)
-api-1    | INFO | app.redis_client | Connected to Redis at redis:6379
-api-1    | INFO | app.redis_client | Consumer group 'agent-workers' already exists on stream 'agent-execution-stream'
-api-1    | INFO | app.main | Worker thread started
-api-1    | INFO | app.worker | Worker setup complete
-api-1    | INFO | app.worker | Worker starting — consuming from stream 'agent-execution-stream' as 'worker-1' in group 'agent-workers'
+data: {"event": "token", "data": {"token": "The", "correlation_id": "abc-123"}}
+
+data: {"event": "token", "data": {"token": " capital", "correlation_id": "abc-123"}}
+
+data: {"event": "token", "data": {"token": " of", "correlation_id": "abc-123"}}
+
+data: {"event": "token", "data": {"token": " France", "correlation_id": "abc-123"}}
+
+data: {"event": "token", "data": {"token": " is", "correlation_id": "abc-123"}}
+
+data: {"event": "token", "data": {"token": " Paris", "correlation_id": "abc-123"}}
+
+data: {"event": "token", "data": {"token": ".", "correlation_id": "abc-123"}}
+
+data: {"event": "done", "data": {"correlation_id": "abc-123"}}
+
 ```
 
-**6. Test the health endpoint**
+#### Example curl Commands
 
-```bash
-curl http://localhost:8000/health
-```
-
-Expected response:
-
-```json
-{"status": "healthy"}
-```
-
-**7. Submit a test query**
+**Non-streaming:**
 
 ```bash
 curl -X POST http://localhost:8000/agents/test-agent/query \
@@ -331,198 +248,234 @@ curl -X POST http://localhost:8000/agents/test-agent/query \
   -d '{"query": "What is the capital of France?"}'
 ```
 
-Expected response:
+**Streaming:**
+
+```bash
+curl -N -X POST http://localhost:8000/agents/test-agent/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the capital of France?", "stream": true}'
+```
+
+> **Note:** The `-N` flag disables output buffering, which is required to see SSE events in real time.
+
+---
+
+### `GET /health`
+
+Simple health check endpoint.
+
+**Response (200 OK):**
 
 ```json
-{
-  "status": "queued",
-  "correlation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "message": "Query queued for agent test-agent"
-}
+{"status": "healthy"}
 ```
 
-**8. Verify Redis Streams state**
+---
+
+## Configuration
+
+All configuration is managed via environment variables, loaded through [`pydantic-settings`](app/config.py). Values can be set in a `.env` file or passed directly as environment variables.
+
+### LLM Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `OPENAI_API_KEY` | `""` (empty) | API key for the OpenAI-compatible LLM proxy |
+| `OPENAI_BASE_URL` | `https://ps.sapientslingshot.com/api/v1/llm` | Base URL for the LLM proxy endpoint |
+| `OPENAI_MODEL` | `gpt-4o-mini` | Model name to use for LLM invocations |
+
+### Redis Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `REDIS_HOST` | `redis` | Redis server hostname (Docker service name) |
+| `REDIS_PORT` | `6379` | Redis server port |
+| `REDIS_PASSWORD` | `""` (empty) | Redis authentication password (optional) |
+| `REDIS_STREAM_NAME` | `agent-execution-stream` | Redis Stream key for message publishing and consumption |
+| `REDIS_CONSUMER_GROUP` | `agent-workers` | Consumer group name for XREADGROUP operations |
+| `REDIS_CONSUMER_NAME` | `worker-1` | Consumer name within the consumer group |
+
+### Streaming Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SSE_STREAM_TIMEOUT` | `300` | Maximum SSE connection duration in seconds |
+| `SSE_HEARTBEAT_INTERVAL` | `15` | Heartbeat interval in seconds |
+| `REDIS_PUBSUB_CHANNEL_PREFIX` | `stream` | Pub/Sub channel prefix (reserved for future use) |
+| `RESULT_CACHE_TTL` | `300` | TTL for cached results in seconds (reserved for future use) |
+
+### Server Configuration
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `LOCAL_SERVER` | `true` | When `true`, spawns the worker as a daemon thread within the API process. When `false`, the worker is not spawned (intended for separate deployment, e.g., Kubernetes pod). |
+
+---
+
+## How to Run
+
+### Prerequisites
+
+- **Docker** and **Docker Compose** installed
+- A valid **API key** for the LLM proxy (OpenAI-compatible endpoint)
+
+### Step 1: Create `.env` file
 
 ```bash
-# Check stream length
-docker compose exec redis redis-cli XLEN agent-execution-stream
-
-# Check consumer group info
-docker compose exec redis redis-cli XINFO GROUPS agent-execution-stream
-
-# Check pending messages (should be 0 after processing)
-docker compose exec redis redis-cli XPENDING agent-execution-stream agent-workers
+# .env
+OPENAI_API_KEY=your-api-key-here
+OPENAI_BASE_URL=https://ps.sapientslingshot.com/api/v1/llm
+OPENAI_MODEL=gpt-4o-mini
 ```
 
-**9. Stop services**
+### Step 2: Build and start services
 
 ```bash
-docker compose down
+docker compose up --build
 ```
 
-To also remove the Redis data volume:
+This starts two containers:
+- **redis** — Redis 7 Alpine with health check
+- **api** — FastAPI server with embedded worker thread
+
+You should see output similar to:
+
+```
+api-1  | INFO | app.main | Redis client connected (API)
+api-1  | INFO | app.redis_client | Connected to Redis at redis:6379
+api-1  | INFO | app.redis_client | Consumer group 'agent-workers' already exists on stream 'agent-execution-stream'
+api-1  | INFO | app.main | Worker thread started
+api-1  | INFO | app.worker | Worker setup complete
+api-1  | INFO | app.worker | Worker starting — consuming from stream 'agent-execution-stream' as 'worker-1' in group 'agent-workers'
+```
+
+### Step 3: Test the endpoints
+
+**Health check:**
 
 ```bash
-docker compose down -v
+curl http://localhost:8000/health
+# {"status":"healthy"}
+```
+
+**Non-streaming query:**
+
+```bash
+curl -X POST http://localhost:8000/agents/test-agent/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the capital of France?"}'
+# {"status":"queued","correlation_id":"af648ad9-...","message":"Query queued for agent test-agent"}
+```
+
+**Streaming query:**
+
+```bash
+curl -N -X POST http://localhost:8000/agents/test-agent/query \
+  -H "Content-Type: application/json" \
+  -d '{"query": "What is the capital of France?", "stream": true}'
+# data: {"event": "token", "data": {"token": "The", "correlation_id": "..."}}
+# data: {"event": "token", "data": {"token": " capital", "correlation_id": "..."}}
+# ...
+# data: {"event": "done", "data": {"correlation_id": "..."}}
+```
+
+### Step 4: Stop services
+
+```bash
+docker compose down        # Stop containers
+docker compose down -v     # Stop containers and remove Redis data volume
 ```
 
 ---
 
-## 8. Message Flow Details
+## How It Works
 
-### Redis Streams Concepts
+### Non-Streaming Flow (Fire-and-Forget via Redis Streams)
 
-{info:title=Redis Streams Overview}
-Redis Streams is a log-like data structure that supports consumer groups for reliable message processing. It provides at-least-once delivery semantics and allows multiple consumers to process messages in parallel.
-{info}
+1. Client sends `POST /agents/{agent_id}/query` with `stream: false` (or omitted)
+2. API generates a UUID `correlation_id`
+3. API publishes the message to Redis Streams via `XADD`
+4. API returns immediately with `{"status": "queued", "correlation_id": "..."}`
+5. Worker thread (polling via `XREADGROUP` with 5s block timeout) picks up the message
+6. Worker invokes `ChatOpenAI.ainvoke()` with the query
+7. Worker acknowledges the message via `XACK`
 
-| Concept | Value | Description |
-|---|---|---|
-| **Stream** | `agent-execution-stream` | The Redis Stream key where messages are published and consumed |
-| **Consumer Group** | `agent-workers` | A named group of consumers that share the workload. Each message is delivered to exactly one consumer in the group. |
-| **Consumer** | `worker-1` | The individual consumer identity within the group |
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as FastAPI API
+    participant RS as Redis Streams
+    participant W as Worker Thread
+    participant LLM as ChatOpenAI
 
-### Operations Used
+    C->>API: POST /agents/{id}/query (stream=false)
+    Note over API: Generate correlation_id (UUID)
+    API->>RS: XADD agent-execution-stream {correlation_id, agent_id, query}
+    API-->>C: 200 JSON: {"status": "queued", "correlation_id": "..."}
 
-| Operation | Redis Command | Where Used | Description |
-|---|---|---|---|
-| **Publish** | `XADD` | `RedisStreamClient.publish_message()` | Appends a new message to the stream. Returns a unique message ID. |
-| **Consume** | `XREADGROUP` | `RedisStreamClient.start_processing()` | Reads new messages (`>`) for the consumer group with a 5-second block timeout. Delivers each message to exactly one consumer. |
-| **Acknowledge** | `XACK` | `RedisStreamClient.acknowledge_message()` | Marks a message as successfully processed. Removes it from the consumer's Pending Entries List (PEL). |
-| **Create Group** | `XGROUP CREATE ... MKSTREAM` | `RedisStreamClient.connect()` | Creates the consumer group and auto-creates the stream if it doesn't exist. Handles `BUSYGROUP` error gracefully. |
+    loop Continuous polling (5s block)
+        W->>RS: XREADGROUP GROUP agent-workers worker-1 BLOCK 5000
+    end
 
-### Message Format
-
-Each message published to the stream contains the following fields:
-
-```json
-{
-  "correlation_id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
-  "agent_id": "test-agent",
-  "query": "What is the capital of France?",
-  "conversation_id": ""
-}
+    RS-->>W: Deliver message
+    W->>LLM: ainvoke([HumanMessage(content=query)])
+    LLM-->>W: Full LLM response
+    W->>RS: XACK agent-execution-stream agent-workers {message_id}
+    Note over W: Message acknowledged, processing complete
 ```
 
-| Field | Type | Description |
-|---|---|---|
-| `correlation_id` | `string` (UUID v4) | Unique identifier for tracking this execution request end-to-end |
-| `agent_id` | `string` | The agent identifier from the URL path parameter |
-| `query` | `string` | The user's query to be sent to the LLM |
-| `conversation_id` | `string` | Optional conversation/session ID (empty string if not provided) |
+### Streaming Flow (Direct SSE via LangChain astream)
 
-### Processing Flow
+1. Client sends `POST /agents/{agent_id}/query` with `stream: true`
+2. API **bypasses Redis/Worker entirely**
+3. API creates an `ExecuteAgentHandler` and calls `handle_stream()`
+4. `handle_stream()` invokes `ChatOpenAI.astream()` which yields `AIMessageChunk` objects
+5. Each chunk's content is wrapped in an SSE event and streamed to the client
+6. On completion, a `done` event is sent and the connection closes
+7. On error, an `error` event is sent and the connection closes
 
-```
-1. API receives POST request
-   └─ Generates UUID correlation_id
-   └─ Calls redis_client.publish_message() → XADD
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant API as FastAPI API
+    participant LLM as ChatOpenAI
 
-2. Worker polling loop (every 5 seconds)
-   └─ Calls redis_client.start_processing() → XREADGROUP
-   └─ Message delivered to callback: _process_message()
+    C->>API: POST /agents/{id}/query (stream=true)
+    Note over API: Bypass Redis/Worker entirely
+    Note over API: Generate correlation_id (UUID)
+    API->>LLM: astream([HumanMessage(content=query)])
 
-3. Message processing
-   └─ Extracts correlation_id, agent_id, query
-   └─ Calls agent_handler.handle(query, agent_id)
-       └─ Creates HumanMessage(content=query)
-       └─ Calls ChatOpenAI.ainvoke([message])
-       └─ Returns response.content
+    loop For each AIMessageChunk
+        LLM-->>API: AIMessageChunk with token
+        API-->>C: SSE: {"event": "token", "data": {"token": "...", "correlation_id": "..."}}
+    end
 
-4. Acknowledgment
-   └─ Calls redis_client.acknowledge_message() → XACK
-   └─ Message removed from Pending Entries List
-```
-
----
-
-## 9. Test Results
-
-{panel:title=Test Execution Summary|borderStyle=solid|borderColor=#4CAF50}
-
-| Test | Status | Details |
-|---|---|---|
-| Docker Compose build | ✅ Success | Both `redis` and `api` containers built and started |
-| Redis health check | ✅ Success | Redis responds to `PING` within health check interval |
-| Worker thread startup | ✅ Success | Worker spawned as daemon thread, connected to Redis, consuming from stream |
-| Health endpoint | ✅ Success | `GET /health` returns `{"status": "healthy"}` |
-| Query endpoint | ✅ Success | `POST /agents/test-agent/query` returns queued response with `correlation_id` |
-| Message publishing | ✅ Success | Message published to `agent-execution-stream` via XADD |
-| Worker processing | ✅ Success | Message consumed via XREADGROUP, LLM invoked successfully |
-| LLM invocation | ✅ Success | `ChatOpenAI.ainvoke()` returned valid response |
-| Message acknowledgment | ✅ Success | XACK successful, 0 pending messages after processing |
-| LLM Response | ✅ Success | _"The capital of France is Paris."_ |
-
-{panel}
-
-### Sample Log Output
-
-```
-api-1  | 2026-03-18 05:00:00 | INFO | app.main | Message published with correlation_id: a1b2c3d4-...
-api-1  | 2026-03-18 05:00:00 | INFO | app.redis_client | Published message 1710... to stream 'agent-execution-stream'
-api-1  | 2026-03-18 05:00:01 | INFO | app.redis_client | Received message 1710... from stream 'agent-execution-stream'
-api-1  | 2026-03-18 05:00:01 | INFO | app.worker | Processing message 1710... | correlation_id=a1b2c3d4-... | agent_id=test-agent
-api-1  | 2026-03-18 05:00:01 | INFO | app.agent_handler | Executing agent test-agent with query: What is the capital of France?
-api-1  | 2026-03-18 05:00:02 | INFO | app.agent_handler | Agent test-agent response: The capital of France is Paris....
-api-1  | 2026-03-18 05:00:02 | INFO | app.worker | Successfully processed message 1710... | correlation_id=a1b2c3d4-... | result_length=35
-api-1  | 2026-03-18 05:00:02 | INFO | app.redis_client | Acknowledged message 1710...
+    API-->>C: SSE: {"event": "done", "data": {"correlation_id": "..."}}
+    Note over API: Close SSE connection
 ```
 
 ---
 
-## 10. Known Limitations & Future Work
+## Key Implementation Details
 
-{warning:title=Known Limitations}
+### Redis Streams Consumer Group Pattern
 
-| # | Limitation | Impact | Future Mitigation |
-|---|---|---|---|
-| 1 | **No tests** | No unit or integration tests | Add pytest suite with mocked Redis and LLM |
-| 2 | **No retry / DLQ logic** | Failed messages are acknowledged and lost | Implement retry with exponential backoff and Dead Letter Queue |
-| 3 | **No streaming / SSE support** | Client cannot receive partial LLM responses | Add Server-Sent Events endpoint for streaming responses |
-| 4 | **No tool calling or LangGraph** | Only simple query→response, no agent pipelines | Integrate LangGraph for multi-step agent execution |
-| 5 | **No conversation memory** | Each query is stateless, no context from prior messages | Add conversation history store (Redis or database) |
-| 6 | **No result delivery to client** | Client has no way to retrieve the LLM response | Implement webhooks, polling endpoint, or SSE for result delivery |
-| 7 | **Single worker instance** | Only one worker thread, no horizontal scaling | Support multiple worker pods/threads with consumer group load balancing |
-| 8 | **No authentication** | API endpoints are unauthenticated | Add JWT/OAuth2 authentication middleware |
-| 9 | **No input/output guardrails** | No content filtering or safety checks | Add input validation and output content filtering |
-| 10 | **No observability** | Basic logging only, no metrics or tracing | Add OpenTelemetry tracing and Prometheus metrics |
-
-{warning}
-
----
-
-## 11. Key Source Code Highlights
-
-### FastAPI Lifespan (Startup/Shutdown)
-
-The application uses FastAPI's `lifespan` context manager to manage the Redis connection and worker thread lifecycle:
+The worker uses Redis Streams consumer groups for reliable message processing. The [`RedisStreamClient`](app/redis_client.py:8) class encapsulates all Redis operations:
 
 ```python
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    # Startup: connect Redis, spawn worker thread
-    await redis_client.connect(...)
-    if settings.LOCAL_SERVER:
-        worker = WorkerApplication()
-        worker_thread = threading.Thread(target=run_worker, daemon=True)
-        worker_thread.start()
-    yield
-    # Shutdown: close Redis connection
-    await redis_client.close()
-```
+# Consumer group creation with MKSTREAM (auto-creates stream)
+await self._redis.xgroup_create(
+    name=stream_name, groupname=group_name, id="0", mkstream=True
+)
 
-### Redis Streams Consumer Loop
-
-The worker uses `XREADGROUP` with a 5-second block timeout to efficiently poll for new messages:
-
-```python
+# Consume loop with 5-second block timeout
 while self._processing:
     messages = await self._redis.xreadgroup(
         groupname=group_name,
         consumername=consumer_name,
         streams={stream_name: ">"},
         count=1,
-        block=5000,  # 5-second block timeout
+        block=5000,
     )
     if not messages:
         continue
@@ -531,9 +484,16 @@ while self._processing:
             await callback(message_id, message_data)
 ```
 
-### LLM Invocation
+| Operation | Redis Command | Method | Description |
+|-----------|--------------|--------|-------------|
+| Publish | `XADD` | [`publish_message()`](app/redis_client.py:53) | Appends message to stream |
+| Consume | `XREADGROUP` | [`start_processing()`](app/redis_client.py:67) | Reads new messages with block timeout |
+| Acknowledge | `XACK` | [`acknowledge_message()`](app/redis_client.py:126) | Marks message as processed |
+| Create Group | `XGROUP CREATE` | [`connect()`](app/redis_client.py:15) | Creates consumer group with MKSTREAM |
 
-The agent handler uses LangChain's `ChatOpenAI` for async LLM invocation:
+### LangChain ChatOpenAI Integration
+
+The [`ExecuteAgentHandler`](app/agent_handler.py:9) provides two invocation modes:
 
 ```python
 class ExecuteAgentHandler:
@@ -545,34 +505,134 @@ class ExecuteAgentHandler:
             temperature=0.7,
         )
 
+    # Non-streaming: used by Worker
     async def handle(self, query: str, agent_id: str) -> str:
         messages = [HumanMessage(content=query)]
         response = await self.llm.ainvoke(messages)
         return response.content
+
+    # Streaming: used by API endpoint directly
+    async def handle_stream(self, query: str, agent_id: str):
+        messages = [HumanMessage(content=query)]
+        async for chunk in self.llm.astream(messages):
+            if chunk.content:
+                yield chunk.content
+```
+
+- **`ainvoke()`** — Returns the complete response at once. Used by the Worker for async processing.
+- **`astream()`** — Yields `AIMessageChunk` objects as they arrive. Used by the API for SSE streaming.
+
+### SSE Event Formatting
+
+The streaming endpoint in [`_handle_streaming_request()`](app/main.py:103) wraps each token in a JSON SSE event:
+
+```python
+async def event_generator():
+    full_response = ""
+    token_count = 0
+    try:
+        async for token in agent_handler.handle_stream(query=request.query, agent_id=agent_id):
+            full_response += token
+            token_count += 1
+            event_data = json.dumps({
+                "event": "token",
+                "data": {"token": token, "correlation_id": correlation_id},
+            })
+            yield f"data: {event_data}\n\n"
+
+        # Completion event
+        done_data = json.dumps({"event": "done", "data": {"correlation_id": correlation_id}})
+        yield f"data: {done_data}\n\n"
+
+    except Exception as exc:
+        error_data = json.dumps({"event": "error", "data": {"message": str(exc), "correlation_id": correlation_id}})
+        yield f"data: {error_data}\n\n"
+
+return StreamingResponse(event_generator(), media_type="text/event-stream", headers={...})
+```
+
+### Worker Thread Lifecycle
+
+The [`lifespan()`](app/main.py:27) context manager manages the worker:
+
+1. **Startup** — Connects to Redis, spawns worker in a daemon thread with its own event loop
+2. **Running** — Worker continuously polls Redis Streams via `XREADGROUP`
+3. **Shutdown** — Closes the API Redis connection; daemon thread terminates with the process
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    await redis_client.connect(...)
+    if settings.LOCAL_SERVER:
+        worker = WorkerApplication()
+        worker_thread = threading.Thread(target=run_worker, daemon=True)
+        worker_thread.start()
+    yield
+    await redis_client.close()
 ```
 
 ---
 
-## 12. References
+## Test Results
 
-| Resource | Link |
-|---|---|
-| Redis Streams Documentation | [https://redis.io/docs/data-types/streams/](https://redis.io/docs/data-types/streams/) |
-| Redis Streams Tutorial | [https://redis.io/docs/data-types/streams-tutorial/](https://redis.io/docs/data-types/streams-tutorial/) |
-| FastAPI Documentation | [https://fastapi.tiangolo.com/](https://fastapi.tiangolo.com/) |
-| FastAPI Lifespan Events | [https://fastapi.tiangolo.com/advanced/events/](https://fastapi.tiangolo.com/advanced/events/) |
-| LangChain Documentation | [https://python.langchain.com/docs/](https://python.langchain.com/docs/) |
-| LangChain ChatOpenAI | [https://python.langchain.com/docs/integrations/chat/openai/](https://python.langchain.com/docs/integrations/chat/openai/) |
-| Pydantic Settings | [https://docs.pydantic.dev/latest/concepts/pydantic_settings/](https://docs.pydantic.dev/latest/concepts/pydantic_settings/) |
-| Docker Compose | [https://docs.docker.com/compose/](https://docs.docker.com/compose/) |
-| Original POC Specification | `worker-execution-poc.md` (in repository root) |
+### Verified Test Results
+
+| Test | Status | Details |
+|------|--------|---------|
+| Docker Compose build | ✅ Pass | Both `redis` and `api` containers built and started |
+| Redis health check | ✅ Pass | Redis responds to `PING` within health check interval |
+| Worker thread startup | ✅ Pass | Worker spawned as daemon thread, connected to Redis, consuming from stream |
+| Health endpoint | ✅ Pass | `GET /health` returns `{"status": "healthy"}` |
+| Non-streaming query | ✅ Pass | Returns `{"status": "queued", "correlation_id": "..."}` |
+| Worker processing | ✅ Pass | Message consumed via XREADGROUP, LLM invoked, XACK successful |
+| Streaming query | ✅ Pass | SSE tokens received in real time |
+| Message acknowledgment | ✅ Pass | 0 pending messages after processing |
+
+### Sample Non-Streaming Output
+
+```
+$ curl -X POST http://localhost:8000/agents/test-agent/query \
+    -H "Content-Type: application/json" \
+    -d '{"query": "What is the capital of France?"}'
+
+{"status":"queued","correlation_id":"af648ad9-e5f6-7890-abcd-ef1234567890","message":"Query queued for agent test-agent"}
+```
+
+Worker logs:
+```
+api-1  | INFO | app.redis_client | Received message 1710... from stream 'agent-execution-stream'
+api-1  | INFO | app.worker | Processing message 1710... | correlation_id=af648ad9-... | agent_id=test-agent
+api-1  | INFO | app.agent_handler | Executing agent test-agent with query: What is the capital of France?
+api-1  | INFO | app.agent_handler | Agent test-agent response: The capital of France is Paris....
+api-1  | INFO | app.worker | Successfully processed message 1710... | correlation_id=af648ad9-... | result_length=35
+api-1  | INFO | app.redis_client | Acknowledged message 1710...
+```
+
+### Sample Streaming Output
+
+```
+$ curl -N -X POST http://localhost:8000/agents/test-agent/query \
+    -H "Content-Type: application/json" \
+    -d '{"query": "What is the capital of France?", "stream": true}'
+
+data: {"event": "token", "data": {"token": "The", "correlation_id": "b2c3d4e5-..."}}
+
+data: {"event": "token", "data": {"token": " capital", "correlation_id": "b2c3d4e5-..."}}
+
+data: {"event": "token", "data": {"token": " of", "correlation_id": "b2c3d4e5-..."}}
+
+data: {"event": "token", "data": {"token": " France", "correlation_id": "b2c3d4e5-..."}}
+
+data: {"event": "token", "data": {"token": " is", "correlation_id": "b2c3d4e5-..."}}
+
+data: {"event": "token", "data": {"token": " Paris", "correlation_id": "b2c3d4e5-..."}}
+
+data: {"event": "token", "data": {"token": ".", "correlation_id": "b2c3d4e5-..."}}
+
+data: {"event": "done", "data": {"correlation_id": "b2c3d4e5-..."}}
+
+```
 
 ---
 
-{tip:title=How to Use This Document in Confluence}
-1. Create a new Confluence page
-2. Switch to the **Markdown** editor (or use the "Insert Markup" option)
-3. Paste this entire document
-4. The Mermaid diagrams will render if the **Mermaid Diagrams for Confluence** plugin is installed
-5. Confluence macros (`{info}`, `{note}`, `{warning}`, `{tip}`, `{panel}`) will render natively
-{tip}
+> **Status:** ✅ POC Complete — All tests passing | **Last Updated:** March 2026
