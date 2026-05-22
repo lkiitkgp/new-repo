@@ -1,6 +1,9 @@
 Overall System Architecture: Custom Metadata IntegrationProject: Custom Metadata Analytics (x-metadata-* Headers)Status: High-Level DesignComponents Involved: api-graph, api-llm, api-llm-track, api-llmtrack-ui, PostgreSQL1. System ObjectiveThe system allows clients to attach arbitrary, custom metadata tags to their LLM and Agent API requests using HTTP headers prefixed with x-metadata- (e.g., x-metadata-tenant-id: acme).The architecture guarantees that these tags are extracted at the network edge, securely propagated through internal microservices, stored efficiently without altering database schemas, and ultimately made available in the UI for dynamic filtering and grouping (segmentation).2. High-Level Architecture Diagramflowchart TD
     Client([Client / Customer])
     
+    flowchart TD
+    Client([Client / Customer])
+    
     subgraph Edge Services
         Graph[api-graph <br/> Agent Orchestrator]
         LLM[api-llm <br/> LLM Gateway]
